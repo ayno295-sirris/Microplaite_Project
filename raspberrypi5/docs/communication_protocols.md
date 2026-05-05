@@ -73,8 +73,8 @@ These are documented for the Raspberry Pi side only.
 - Keep commands minimal and readable.
 - M7 is an implementation milestone, not a documentation-only placeholder.
 - Pump control remains out of scope for M7.
-- The Raspberry Pi implementation lives in `rpi5_project`.
-- The ESP32 implementation lives in `esp32_project`.
+- The Raspberry Pi implementation lives in `raspberrypi5`.
+- The ESP32 implementation lives in `esp32_platformio`.
 
 ---
 

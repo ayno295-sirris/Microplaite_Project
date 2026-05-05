@@ -22,9 +22,8 @@ Architecture rule:
 The GUI never controls hardware directly.
 
 Current Raspberry Pi codebase:
-- `app/` contains entry point and configuration
-- `services/` contains logging support
-- future `control/`, `hardware/`, `drivers/`, and `ui/` layers must be added only when the roadmap reaches them
+- `src/` contains the current executable code
+- future `src/control/`, `src/hardware/`, `src/drivers/`, and `src/ui/` layers must be added only when the roadmap reaches them
 
 Allowed Raspberry Pi flow:
 UI -> control -> hardware -> drivers
@@ -36,15 +35,15 @@ Allowed camera flow:
 UI -> process_controller -> camera_control -> Camera -> CameraDriver
 
 Forbidden:
-- `ui/` must not import `pyserial`
-- `ui/` must not import `cv2` directly
-- `ui/` must not access GPIO
-- `ui/` must not access pump RS485
-- `ui/` must not access heater control
-- `ui/` must not access NeoPixel control
-- `ui/` must not access ESP32 serial directly
-- `drivers/` must not import `ui/`
-- `../esp32_project` must not depend on Raspberry Pi GUI logic
+- `src/ui/` must not import `pyserial`
+- `src/ui/` must not import `cv2` directly
+- `src/ui/` must not access GPIO
+- `src/ui/` must not access pump RS485
+- `src/ui/` must not access heater control
+- `src/ui/` must not access NeoPixel control
+- `src/ui/` must not access ESP32 serial directly
+- `src/drivers/` must not import `src/ui/`
+- `../esp32_platformio` must not depend on Raspberry Pi GUI logic
 
 Write code like an engineer building a test bench:
 - Prefer simple, explicit code over abstract patterns
@@ -75,5 +74,5 @@ Write code like an engineer building a test bench:
 - Do not implement functionality before the corresponding milestone
 
 Experiment recipes are not implemented yet.
-Future experiment sequences must not be implemented inside `ui/`.
-They must belong to `services/experiment_runner.py` or `control/process_controller.py`.
+Future experiment sequences must not be implemented inside `src/ui/`.
+They must belong to `src/services/experiment_runner.py` or `src/control/process_controller.py`.

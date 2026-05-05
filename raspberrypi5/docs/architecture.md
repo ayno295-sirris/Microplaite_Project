@@ -23,22 +23,23 @@ The ESP32 owns the hardware that must stay local.
 - NeoPixel
 - local safety limits
 
-## Current Raspberry Pi layers
-- `app/`: entry point and config
-- `services/`: logging support
+## Current Raspberry Pi code
+- `src/main.py`: entry point
+- `src/config.py`: environment-driven configuration
+- `src/logger.py`: logging setup
 
 ## Future Raspberry Pi layers
-- `control/`: process coordination
-- `hardware/`: host-side hardware wrappers
-- `drivers/`: low-level serial and camera drivers
-- `ui/`: GUI surface
+- `src/control/`: process coordination
+- `src/hardware/`: host-side hardware wrappers
+- `src/drivers/`: low-level serial and camera drivers
+- `src/ui/`: GUI surface
 
 ## Firmware location
-- `../esp32_project/`: isolated ESP32-S3 PlatformIO firmware
+- `../esp32_platformio/`: isolated ESP32-S3 PlatformIO firmware
 
 ## Development environments
 - Raspberry Pi app: developed in a VS Code Remote SSH workspace on the Raspberry Pi 5
-- ESP32 firmware: developed in the separate `esp32_project/` PlatformIO workspace and uploaded over USB
+- ESP32 firmware: developed in the separate `esp32_platformio/` PlatformIO workspace and uploaded over USB
 
 ## GUI rule
 The GUI never controls hardware directly.
@@ -52,4 +53,4 @@ The GUI never controls hardware directly.
 - UI importing or using hardware drivers directly
 - UI accessing GPIO, pump, heater, NeoPixel, or ESP32 serial directly
 - drivers importing GUI code
-- `../esp32_project` depending on Raspberry Pi GUI logic
+- `../esp32_platformio` depending on Raspberry Pi GUI logic

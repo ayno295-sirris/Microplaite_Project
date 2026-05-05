@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from app.config import APP_NAME
-from app.config import DEFAULT_LOG_DIR
-from app.config import load_config
+from config import APP_NAME
+from config import DEFAULT_LOG_DIR
+from config import load_config
 
 
 def test_load_config_uses_defaults(monkeypatch) -> None:

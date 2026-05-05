@@ -24,7 +24,7 @@ Verification:
 Goal: add simple Raspberry Pi Python config and logging for the supervisor application.
 Verification:
 - Config values are centralized.
-- Logging starts from `app/main.py`.
+- Logging starts from `src/main.py`.
 - No hardware access yet.
 
 ## M3 - ESP32-S3 PlatformIO workspace
@@ -34,7 +34,7 @@ Scope:
 - Keep `setup()` and `loop()` short and explicit.
 - Create a clean main firmware entry point, pin definitions, shared configuration, and placeholder modules.
 Verification:
-- PlatformIO project exists under `../esp32_project`.
+- PlatformIO project exists under `../esp32_platformio`.
 - The ESP32-S3 board target is defined explicitly.
 - Compilation succeeds.
 - Upload to the ESP32-S3 is possible.
@@ -88,7 +88,7 @@ Verification:
 ## M9 - ESP32 pump RS485 control
 Goal: control the Longer T100/WX10 pump from the ESP32.
 Verification:
-- Pump protocol is isolated in `esp32_project/lib/pump_rs485`.
+- Pump protocol is isolated in `esp32_platformio/lib/pump_rs485`.
 - Raspberry Pi never talks directly to the pump.
 - Raspberry Pi sends only high-level pump commands to ESP32.
 
@@ -114,11 +114,11 @@ Verification:
 Goal: expose manual controls and status display.
 Verification:
 - GUI does not access serial ports, camera driver, ESP32 driver, pump, heater, or NeoPixel directly.
-- GUI calls only `control/` or `app/`.
+- GUI calls only `src/control/` or `src/`.
 
 ## M14 - Experiment logging and recipe foundation
-Goal: record experiment data cleanly and prepare the project for future recipes without implementing them in `ui/`.
+Goal: record experiment data cleanly and prepare the project for future recipes without implementing them in `src/ui/`.
 Verification:
 - Logs are timestamped.
 - Data files are simple and readable.
-- Future experiment sequencing belongs in `services/experiment_runner.py` or `control/process_controller.py`.
+- Future experiment sequencing belongs in `src/services/experiment_runner.py` or `src/control/process_controller.py`.

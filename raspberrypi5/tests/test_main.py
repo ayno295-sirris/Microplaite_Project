@@ -1,7 +1,7 @@
 from pathlib import Path
 import logging
 
-from app.main import main
+from main import main
 
 
 def test_main_creates_log_file(monkeypatch, tmp_path: Path) -> None:

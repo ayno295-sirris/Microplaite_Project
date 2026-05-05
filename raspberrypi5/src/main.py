@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from app.config import load_config
-from services.logger import setup_logging
+from config import load_config
+from logger import setup_logging
 
 
 def main() -> None:

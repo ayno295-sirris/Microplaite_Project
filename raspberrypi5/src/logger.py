@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config import AppConfig
+from config import AppConfig
 
 
 LOG_FILE_NAME = "microplaite.log"
