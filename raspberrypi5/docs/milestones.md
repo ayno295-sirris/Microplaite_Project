@@ -51,6 +51,12 @@ Verification:
 - USB or serial access between Raspberry Pi and ESP32 is physically in place.
 - No active heater or pump power stage is required yet.
 
+Current M4 status:
+- Raspberry Pi to ESP32 USB serial link is validated.
+- ESP32 appears on the Pi as `/dev/ttyUSB0` through a CP2102N bridge.
+- Heartbeat from ESP32 firmware is readable from the Pi at `115200` baud.
+- DIN rail mounting and final power distribution are still pending.
+
 ## M5 - Heater power stage bring-up
 Goal: build the heating circuit and validate safe low-level heater actuation from the ESP32.
 Verification:
