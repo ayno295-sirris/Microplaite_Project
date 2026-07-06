@@ -7,7 +7,7 @@ Python/PySide6 interface for supervising the Microplaite ESP32 over UART. The no
 - GUI: PySide6, fixed 1280 x 720 on Windows.
 - Trend graph: minimal `pyqtgraph` temperature curve.
 - Flow: UI -> AppController -> Esp32Client.
-- `SerialEsp32Client`: UART client for `COM10` on Windows or `/dev/serial0` on Raspberry Pi.
+- `SerialEsp32Client`: UART client for `COM10` on Windows, auto-detected ESP32 USB serial on Raspberry Pi, or `/dev/serial0` fallback.
 - `FakeEsp32Client`: kept only for unit tests and internal development checks.
 - Raspberry/PC role: interface, supervision, recent logs, and operator actions.
 
@@ -57,18 +57,32 @@ Explicit Windows COM10 run:
 python scripts\run_microplaite_ui.py --port COM10
 ```
 
-Future Raspberry Pi serial run on `/dev/serial0`:
+Raspberry Pi run. This auto-detects the ESP32 on `/dev/serial/by-id/*`, `/dev/ttyACM*`, or `/dev/ttyUSB*`, then falls back to `/dev/serial0`:
 
 ```bash
-python scripts/run_microplaite_ui.py --port /dev/serial0
+python scripts/run_microplaite_ui.py
 ```
 
-If the ESP32 is not connected, the UI shows `Port COM10 - disconnected` and `ESP32 not connected`. It does not switch to fake data.
+Manual Raspberry Pi port override:
+
+```bash
+python scripts/run_microplaite_ui.py --port /dev/ttyUSB0
+MICROPLAITE_SERIAL_PORT=/dev/ttyUSB0 python scripts/run_microplaite_ui.py
+```
+
+Install a clickable Raspberry Pi desktop/menu shortcut:
+
+```bash
+python scripts/install_desktop_shortcut.py
+```
+
+If the ESP32 is not connected, the UI shows the selected port as disconnected and `ESP32 not connected`. It does not switch to fake data.
 
 ## UART
 
 - Windows port: `COM10`
-- Raspberry Pi port: `/dev/serial0`
+- Raspberry Pi USB port: auto-detected from `/dev/serial/by-id/*`, `/dev/ttyACM*`, or `/dev/ttyUSB*`
+- Raspberry Pi fallback port: `/dev/serial0`
 - Baudrate: `115200`
 - Line ending: `\n`
 
