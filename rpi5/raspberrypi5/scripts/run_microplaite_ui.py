@@ -11,7 +11,11 @@ from microplaite_ui.main import run_gui
 
 def main() -> int:
     parser = ArgumentParser(description="Run the Microplaite ESP32 UART GUI.")
-    parser.add_argument("--port", default=default_serial_port(), help="Serial port, for example COM10 or /dev/serial0.")
+    parser.add_argument(
+        "--port",
+        default=default_serial_port(),
+        help="Serial port, for example COM10, /dev/ttyUSB0, /dev/ttyACM0, or /dev/serial0.",
+    )
     args = parser.parse_args()
     return run_gui(SerialEsp32Client(args.port, DEFAULT_BAUDRATE))
 
