@@ -388,8 +388,8 @@ def test_navigation_methods_select_expected_pages() -> None:
     assert window.pages.currentIndex() == MainWindow.PAGE_THERMAL
     window.show_pump_page()
     assert window.pages.currentIndex() == MainWindow.PAGE_PUMP
-    window.show_neopixel_page()
-    assert window.pages.currentIndex() == MainWindow.PAGE_NEOPIXEL
+    window.show_timelapse_page()
+    assert window.pages.currentIndex() == MainWindow.PAGE_TIMELAPSE
     window.show_camera_page()
     assert window.pages.currentIndex() == MainWindow.PAGE_CAMERA
     window.show_home_page()
@@ -431,22 +431,22 @@ def test_status_pills_are_compact() -> None:
         assert pill.height() <= 50
 
 
-def test_neopixel_page_controls_update_local_state_and_home_card() -> None:
+def test_timelapse_page_replaces_neopixel_card_and_shows_controls() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
-    client = RecordingClient()
-    window = MainWindow(AppController(client))
+    window = MainWindow(AppController(FakeEsp32Client()))
     window.timer.stop()
-    client.commands.clear()
+    window.show_timelapse_page()
+    window.show()
+    app.processEvents()
 
-    window._set_neopixel_enabled(False)
-    window.neo_slider.setValue(35)
-
-    assert window.controller.state.neopixel.enabled is False
-    assert window.controller.state.neopixel.brightness_percent == 35
-    assert window.neo_spin.value() == 35
-    assert window.home_neo_status.text() == "OFF"
-    assert window.home_neo_brightness.text() == "35%"
-    assert client.commands == ["NEOPIXEL_OFF", "NEOPIXEL_BRIGHTNESS 35"]
+    assert window.pages.currentIndex() == MainWindow.PAGE_TIMELAPSE
+    assert window.storage_combo.currentData() == "internal"
+    assert window.timelapse_brightness_spin.value() == 80
+    assert window.light_duration_spin.value() == 1.0
+    assert window.home_timelapse_status.text() == "Stopped"
+    assert "Path:" in window.timelapse_path.text()
+    texts = {button.text() for button in window.timelapse_page.findChildren(QPushButton)}
+    assert {"START TIMELAPSE", "STOP", "TEST CAPTURE", "START LIVE VIDEO", "STOP LIVE VIDEO"} <= texts
 
 
 def test_pump_page_controls_update_local_state_and_home_card() -> None:

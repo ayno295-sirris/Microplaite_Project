@@ -19,23 +19,35 @@ Live updates use `LOG_ON 200` and one Qt timer that reads available serial lines
 - Header: title, serial port state, and global state (`DISCONNECTED`, `IDLE`, `RUNNING`, `ERROR`).
 - Left panel: large current temperature and a five-minute live temperature graph fed by `LOG,time_ms,temp,target,heater,gpio14,mode,sensor,fault`.
 - Center panel: target, mode, heater output, sensor state, fault state, last error, Pump preview,
-  NeoPixel preview, and Camera preview.
+  Timelapse preview, and Camera preview.
 - Right panel: large touch actions for `START PID`, `STOP`, `CLEAR ERROR`, and `REFRESH STATUS`.
 - Bottom strip: compact status summary and a short log area capped to fit the 1280 x 720 landscape screen.
 
 The layout is optimized for Raspberry Pi Touch Display 2 in 1280 x 720 landscape mode. STOP stays large, red, and always visible.
 
-Pump and NeoPixel controls are usable locally in the UI to prepare the future firmware integration:
+Pump and Timelapse controls are usable from the UI:
 
 - Pump RPM, START PUMP, STOP PUMP, and PRIME update `AppState.pump` and the Home card locally.
-- NeoPixel ON/OFF and brightness update `AppState.neopixel`, the visual ring preview, and the Home card locally.
-- No Pump or NeoPixel UART command is sent while those commands are absent from
-  `docs/esp32_uart/serial_commands.md`.
-- The controller logs a clear local message such as `Pump control not supported by current firmware`
-  or `NeoPixel control not supported by current firmware` instead of calling `Esp32Client`.
+- Timelapse uses `AppController` to set NeoPixel brightness, turn the ring on just before capture,
+  and turn it off in `finally` after every capture attempt.
+- The Timelapse page provides storage selection, disk free space, interval, NeoPixel power,
+  light duration, finite or infinite duration, Start/Stop, Test Capture, Live Video Start/Stop,
+  frame count, last saved file, and `metadata.json`.
 
-The Camera page shows the first detected USB camera through Qt Multimedia. It keeps the touchable BACK
-button and does not add OpenCV.
+The Camera page shows the first detected USB camera through Qt Multimedia when Live Video is started.
+It keeps the touchable BACK button and does not add OpenCV.
+
+## Timelapse Manual Test
+
+1. Start the UI on the Raspberry Pi with the camera, ESP32, and NeoPixel connected.
+2. Open `Timelapse`, select `Internal Raspberry Pi`, and confirm the displayed path and disk free value.
+3. Press `START LIVE VIDEO`, wait for a stable image, then press `TEST CAPTURE`.
+4. Confirm the NeoPixel turns on only during the configured light duration and turns off after capture.
+5. Confirm `Last file` points to `test_capture_YYYYMMDD_HHMMSS.jpg` and the image opens from that path.
+6. Set interval to `10 seconds`, light duration to `1.0 s`, duration to `1 min`, then press `START TIMELAPSE`.
+7. Confirm the frame counter increments without UI freeze and the NeoPixel turns off after every frame.
+8. Press `STOP` and verify the session folder contains `img_*.jpg` and `metadata.json`.
+9. Repeat with `External disk` inserted, then remove or unmount it before start to confirm a clear storage error.
 
 ## Run
 
@@ -97,10 +109,13 @@ Commands used by the GUI:
 - `PID_ON`
 - `PID_OFF`
 - `STOP`
+- `NEOPIXEL_ON`
+- `NEOPIXEL_OFF`
+- `NEOPIXEL_BRIGHTNESS <percent>`
 - `LOG_ON 200`
 - `LOG_OFF`
 
-No Pump or NeoPixel command is currently emitted by the GUI.
+Pump and NeoPixel support depends on the connected firmware command set.
 
 Reference ESP32 UART documents are copied in `docs/esp32_uart/`.
 

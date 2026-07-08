@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from typing import Callable
 
@@ -22,6 +23,7 @@ class AppController:
         self.client = client
         self.state = AppState(port=getattr(client, "port", ""), connected=False)
         self.logs: deque[str] = deque(maxlen=50)
+        self._client_lock = threading.RLock()
 
     def refresh_status(self) -> AppState:
         return self._call(self.client.status)
@@ -35,13 +37,14 @@ class AppController:
         if not self.state.connected:
             return self.state
         try:
-            read_pending_lines = getattr(self.client, "read_pending_lines", None)
-            if callable(read_pending_lines):
-                for line in read_pending_lines():
-                    self._apply(parse_line(line))
-            else:
-                for message in self.client.read_available():
-                    self._apply(message)
+            with self._client_lock:
+                read_pending_lines = getattr(self.client, "read_pending_lines", None)
+                if callable(read_pending_lines):
+                    for line in read_pending_lines():
+                        self._apply(parse_line(line))
+                else:
+                    for message in self.client.read_available():
+                        self._apply(message)
         except Esp32ClientError as exc:
             self.state.connected = False
             self.state.last_error = "ESP32 not connected"
@@ -90,6 +93,15 @@ class AppController:
         self._call(lambda: self.client.neopixel_brightness(self.state.neopixel.brightness_percent))
         return self.state.last_message
 
+    def timelapse_neopixel_on(self) -> None:
+        self.set_neopixel_enabled(True)
+
+    def timelapse_neopixel_off(self) -> None:
+        self.set_neopixel_enabled(False)
+
+    def timelapse_neopixel_brightness(self, percent: int) -> None:
+        self.set_neopixel_brightness(percent)
+
     def set_pump_target_rpm(self, rpm: int) -> str:
         self.state.pump.target_rpm = max(0, min(100, int(rpm)))
         if self.state.pump.running:
@@ -122,10 +134,12 @@ class AppController:
     def shutdown(self) -> None:
         if self.state.connected:
             try:
-                self.client.log_off()
+                with self._client_lock:
+                    self.client.log_off()
             except Esp32ClientError:
                 pass
-        self.client.close()
+        with self._client_lock:
+            self.client.close()
 
     def _log_local_unsupported(self, message: str) -> str:
         self.state.last_message = message
@@ -138,7 +152,8 @@ class AppController:
 
     def _call(self, action: Callable[[], ParsedMessage]) -> AppState:
         try:
-            message = action()
+            with self._client_lock:
+                message = action()
             self.state.connected = True
             self._apply(message)
         except Esp32ClientError as exc:
