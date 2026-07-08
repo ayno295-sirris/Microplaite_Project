@@ -117,7 +117,7 @@ QFrame#card,
 QFrame#temperatureCard,
 QFrame#thermalCard,
 QFrame#pumpCard,
-QFrame#neoPixelCard,
+QFrame#timelapseCard,
 QFrame#cameraCard {
     background: #ffffff;
     border: 1px solid #ccdbeb;
@@ -291,7 +291,9 @@ QSlider:disabled::sub-page:horizontal {
     background: #9aa9b8;
 }
 
-QSpinBox {
+QSpinBox,
+QDoubleSpinBox,
+QComboBox {
     min-height: 34px;
     border: 1px solid #ccdbeb;
     border-radius: 10px;
@@ -301,9 +303,17 @@ QSpinBox {
     font-size: 17px;
 }
 
-QSpinBox:disabled {
+QSpinBox:disabled,
+QDoubleSpinBox:disabled,
+QComboBox:disabled {
     color: #4d5e73;
     background: #f5f8fb;
+}
+
+QCheckBox {
+    color: #0f1a29;
+    font-size: 16px;
+    spacing: 8px;
 }
 
 QPlainTextEdit#logBox {
