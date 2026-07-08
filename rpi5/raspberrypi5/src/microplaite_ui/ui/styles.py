@@ -113,6 +113,15 @@ QLabel#bottomStatus {
     font-size: 14px;
 }
 
+QLabel#previewBadge {
+    background: #e5edf5;
+    border-radius: 11px;
+    color: #0f1a29;
+    font-size: 13px;
+    font-weight: 800;
+    padding: 3px 10px;
+}
+
 QFrame#card,
 QFrame#temperatureCard,
 QFrame#thermalCard,

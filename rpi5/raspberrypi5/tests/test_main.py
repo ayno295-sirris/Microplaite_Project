@@ -11,6 +11,7 @@ from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, TEMP_HISTORY_MAXLEN, derive_system_status
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
+from microplaite_ui.services import timelapse as timelapse_module
 from microplaite_ui.ui.main_window import MainWindow
 
 
@@ -331,7 +332,7 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.width() == SCREEN_WIDTH
     assert window.height() == SCREEN_HEIGHT
     assert window.log_view.height() <= 80
-    assert window.stop_button.height() >= 60
+    assert window.stop_button.height() >= 50
     assert window.start_button.isVisible()
     assert window.start_button.width() == 200
     assert window.start_button.sizeHint().width() <= window.start_button.width()
@@ -346,9 +347,10 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.home_heater.x() == window.start_button.x()
     assert window.home_heater.y() > window.start_button.geometry().bottom()
     assert not hasattr(window, "home_system_status")
+    temperature_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "temperatureCard"]
     camera_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "cameraCard"]
     assert camera_cards[0].width() >= 700
-    assert camera_cards[0].height() >= 340
+    assert camera_cards[0].height() >= 280
     window._camera_image = QImage(320, 240, QImage.Format.Format_RGB32)
     window._camera_image.fill(0x216EE5)
     window._paint_camera_image()
@@ -357,9 +359,21 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.stop_button.isVisible()
     assert window.clear_button.isVisible()
     assert window.refresh_button.isVisible()
-    assert window.stop_button.y() > camera_cards[0].geometry().bottom()
+    assert window.stop_button.y() > max(
+        temperature_cards[0].geometry().bottom(),
+        camera_cards[0].geometry().bottom(),
+    )
     assert window.clear_button.y() == window.stop_button.y()
     assert window.refresh_button.y() == window.stop_button.y()
+    assert window.log_view.geometry().bottom() <= window.home_page.height()
+
+    window.setFixedSize(SCREEN_WIDTH, 640)
+    app.processEvents()
+    assert window.stop_button.y() > max(
+        temperature_cards[0].geometry().bottom(),
+        camera_cards[0].geometry().bottom(),
+    )
+    assert window.log_view.geometry().bottom() <= window.home_page.height()
 
 
 def test_main_window_starts_status_then_log_on_when_connected() -> None:
@@ -625,17 +639,120 @@ def test_live_video_start_refuses_when_timelapse_is_active() -> None:
     assert "Stop timelapse before starting live video" in window.controller.logs
 
 
-def test_test_capture_requires_live_video() -> None:
+def test_live_video_start_turns_neopixel_on_and_stop_turns_it_off(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    client = RecordingClient()
+    window = MainWindow(AppController(client))
+    window.timer.stop()
+    window.test_brightness_spin.setValue(66)
+    client.commands.clear()
+
+    def fake_start_usb_camera(mode: str) -> bool:
+        window._camera_mode = mode
+        image = QImage(32, 24, QImage.Format.Format_RGB32)
+        image.fill(0x216EE5)
+        with window._camera_image_lock:
+            window._camera_image = image
+        return True
+
+    monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
+
+    window._start_live_video()
+
+    assert window.timelapse_service.snapshot().live_running is True
+    assert window.controller.state.neopixel.enabled is True
+    assert window.home_camera_badge.text() == "Live"
+    assert window.timelapse_camera_badge.text() == "Live"
+    assert window.camera_preview_badge.text() == "Live"
+    assert client.commands == ["NEOPIXEL_BRIGHTNESS 66", "NEOPIXEL_ON"]
+
+    client.commands.clear()
+    window._stop_live_video()
+
+    assert window.timelapse_service.snapshot().live_running is False
+    assert window.controller.state.neopixel.enabled is False
+    assert client.commands == ["NEOPIXEL_OFF"]
+
+
+def test_test_capture_refuses_when_live_video_is_active() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow(AppController(FakeEsp32Client()))
     window.timer.stop()
 
     window._show_timelapse_tab(1)
+    assert window.timelapse_service.set_live_running(True) is True
+    window._camera_mode = "live"
     window._test_capture()
 
     assert window.timelapse_service.snapshot().last_file == ""
-    assert "Start live video before test capture" in window.timelapse_error.text()
-    assert "Start live video before test capture" in window.controller.logs
+    assert "Stop live video before test capture" in window.timelapse_error.text()
+    assert "Stop live video before test capture" in window.controller.logs
+
+
+def test_test_capture_runs_without_live_and_toggles_neopixel(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(timelapse_module, "INTERNAL_STORAGE", tmp_path)
+    app = QApplication.instance() or QApplication(sys.argv)
+    client = RecordingClient()
+    window = MainWindow(AppController(client))
+    window.timer.stop()
+    window._show_timelapse_tab(1)
+    window.show()
+    app.processEvents()
+    client.commands.clear()
+
+    def fake_start_usb_camera(mode: str) -> bool:
+        window._camera_mode = mode
+        image = QImage(32, 24, QImage.Format.Format_RGB32)
+        image.fill(0x216EE5)
+        with window._camera_image_lock:
+            window._camera_image = image
+        return True
+
+    monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
+    window.light_duration_spin.setValue(0.0)
+
+    window._test_capture()
+
+    saved = list(tmp_path.glob("test_capture_*.jpg"))
+    assert len(saved) == 1
+    assert window.timelapse_service.snapshot().last_file == str(saved[0])
+    assert window._camera_mode == "idle"
+    assert window.home_camera_badge.text() == "Last picture"
+    assert window.timelapse_camera_badge.text() == "Last picture"
+    assert window.camera_preview_badge.text() == "Last picture"
+    assert window.home_camera_preview.pixmap() is not None
+    assert window.timelapse_live_preview.pixmap() is not None
+    assert window.camera_preview.pixmap() is not None
+    assert client.commands == [
+        "NEOPIXEL_BRIGHTNESS 80",
+        "NEOPIXEL_ON",
+        "NEOPIXEL_OFF",
+    ]
+
+
+def test_timelapse_camera_preview_uses_only_saved_images(tmp_path) -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    last_picture = QImage(8, 8, QImage.Format.Format_RGB32)
+    last_picture.fill(0xAA0000)
+    live_frame = QImage(8, 8, QImage.Format.Format_RGB32)
+    live_frame.fill(0x0022CC)
+    with window._camera_image_lock:
+        window._last_picture_image = last_picture
+        window._camera_image = live_frame
+    window._camera_mode = "timelapse"
+
+    assert window._preview_badge_text() == "Last picture"
+    assert window._preview_image().pixelColor(0, 0).name() == "#aa0000"
+
+    saved = window._save_camera_image(tmp_path / "saved.jpg")
+
+    assert saved == tmp_path / "saved.jpg"
+    assert window._last_picture_path == str(saved)
+    assert window._preview_badge_text() == "Last picture"
+    assert window._preview_image().pixelColor(0, 0).name() == "#0022cc"
 
 
 def test_timelapse_stop_button_stays_visible_on_both_tabs() -> None:
@@ -730,7 +847,7 @@ def test_pump_page_uses_large_step_buttons() -> None:
     assert window.pump_plus_button.height() >= 70
 
 
-def test_camera_page_contains_only_back_and_full_preview() -> None:
+def test_camera_page_contains_live_controls_and_full_preview() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow(AppController(FakeEsp32Client()))
     window.timer.stop()
@@ -740,9 +857,13 @@ def test_camera_page_contains_only_back_and_full_preview() -> None:
 
     buttons = window.camera_page.findChildren(QPushButton)
 
-    assert buttons == [window.camera_back_button]
+    assert window.camera_back_button in buttons
+    assert window.camera_start_live_button in buttons
+    assert window.camera_stop_live_button in buttons
     assert window.camera_back_button.text() == "BACK"
+    assert window.camera_start_live_button.text() == "START LIVE"
+    assert window.camera_stop_live_button.text() == "STOP LIVE"
     assert window.camera_preview.objectName() == "cameraFullPreview"
     assert window.camera_preview.y() <= 90
-    assert window.camera_preview.height() >= 600
+    assert window.camera_preview.height() >= 590
     assert not hasattr(window, "camera_status")

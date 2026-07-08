@@ -167,6 +167,9 @@ class TimelapseService:
             if self._snapshot.running:
                 self._append_log("test capture refused because timelapse is running")
                 return False
+            if self._snapshot.live_running:
+                self._append_log("test capture refused because live video is running")
+                return False
         path = self.resolve_storage_path(settings.storage_mode)
         try:
             self._ensure_writable(path)

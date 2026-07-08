@@ -135,3 +135,18 @@ def test_test_capture_refuses_when_timelapse_is_running(tmp_path, monkeypatch) -
         assert not list(tmp_path.glob("test_capture_*.jpg"))
     finally:
         service.stop()
+
+
+def test_test_capture_refuses_when_live_video_is_running(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(timelapse_module, "INTERNAL_STORAGE", tmp_path)
+    fake = FakeHardware()
+    logs: list[str] = []
+    service = service_for(fake, logs)
+
+    assert service.set_live_running(True) is True
+    ok = service.test_capture(TimelapseSettings(light_duration_s=0))
+
+    assert ok is False
+    assert any("test capture refused because live video is running" in line for line in logs)
+    assert fake.events == []
+    assert not list(tmp_path.glob("test_capture_*.jpg"))

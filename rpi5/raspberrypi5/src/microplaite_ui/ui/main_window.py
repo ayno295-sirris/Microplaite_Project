@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 import os
 import threading
+import time
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import (
     QCamera,
@@ -92,6 +93,8 @@ class NeoRingPreview(QWidget):
 
 
 class MainWindow(QMainWindow):
+    preview_refresh_requested = Signal()
+
     PAGE_HOME = 0
     PAGE_TEMPERATURE = 1
     PAGE_THERMAL = 2
@@ -111,6 +114,8 @@ class MainWindow(QMainWindow):
         self._camera_sink: QVideoSink | None = None
         self._camera_mode = "idle"
         self._camera_image = QImage()
+        self._last_picture_image = QImage()
+        self._last_picture_path = ""
         self._camera_image_lock = threading.Lock()
         self._timelapse_notice = ""
         self.timelapse_service = TimelapseService(
@@ -120,7 +125,9 @@ class MainWindow(QMainWindow):
             set_neopixel_brightness=self.controller.timelapse_neopixel_brightness,
             log=self.controller.logs.append,
         )
+        self._load_latest_picture_preview()
         self._build()
+        self.preview_refresh_requested.connect(self._refresh_camera_previews)
         self.setWindowTitle("Microplaite Control")
         self.setFixedSize(SCREEN_WIDTH, SCREEN_HEIGHT)
         self.setStyleSheet(QSS)
@@ -159,7 +166,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self._home_temperature_card())
 
         middle = QVBoxLayout()
-        middle.setSpacing(10)
+        middle.setSpacing(8)
         preview_row = QHBoxLayout()
         preview_row.setSpacing(14)
         preview_row.addWidget(self._home_pump_card())
@@ -183,11 +190,11 @@ class MainWindow(QMainWindow):
         return root
 
     def _home_temperature_card(self) -> ClickableCard:
-        card = self._clickable_card("temperatureCard", 500, 456)
+        card = self._clickable_card("temperatureCard", 500, 390)
         card.clicked.connect(self.show_temperature_page)
         box = QVBoxLayout(card)
-        box.setContentsMargins(18, 16, 18, 16)
-        box.setSpacing(10)
+        box.setContentsMargins(18, 14, 18, 12)
+        box.setSpacing(6)
 
         top = QHBoxLayout()
         top.addWidget(self._caption("Thermal control"))
@@ -198,9 +205,9 @@ class MainWindow(QMainWindow):
         top.addWidget(self.home_thermo_label)
         box.addLayout(top)
         summary = QVBoxLayout()
-        summary.setSpacing(8)
+        summary.setSpacing(5)
         temp_box = QVBoxLayout()
-        temp_box.setSpacing(12)
+        temp_box.setSpacing(6)
         temp_box.addWidget(self._small_text("Current temperature"))
 
         self.home_temp_value = QLabel("--.- °C")
@@ -210,15 +217,15 @@ class MainWindow(QMainWindow):
         summary.addLayout(temp_box)
 
         controls = QVBoxLayout()
-        controls.setSpacing(10)
+        controls.setSpacing(5)
         controls.addWidget(self._small_text("Setpoint"))
         self.home_setpoint = QLabel("--.-- Â°C")
         self.home_setpoint.setObjectName("mediumValue")
         self.home_setpoint.setMinimumWidth(240)
-        self.home_setpoint.setFixedHeight(38)
+        self.home_setpoint.setFixedHeight(34)
         controls.addWidget(self.home_setpoint)
         nudge = QHBoxLayout()
-        nudge.setSpacing(12)
+        nudge.setSpacing(10)
         nudge.addWidget(self._setpoint_button("-", lambda: self._nudge_target(-0.1)))
         nudge.addWidget(self._setpoint_button("+", lambda: self._nudge_target(0.1)))
         nudge.addStretch()
@@ -227,11 +234,11 @@ class MainWindow(QMainWindow):
         control_row = QHBoxLayout()
         control_row.setSpacing(22)
         action = QVBoxLayout()
-        action.setSpacing(10)
-        self.start_button = self._button("START", "primaryButton", 200, 54)
+        action.setSpacing(6)
+        self.start_button = self._button("START", "primaryButton", 200, 48)
         self.start_button.clicked.connect(self._toggle_pid)
         action.addWidget(self.start_button)
-        action.addSpacing(18)
+        action.addSpacing(4)
         action.addWidget(self._small_text("Heater output"))
         self.home_heater = QLabel("--.- %")
         self.home_heater.setObjectName("metricValue")
@@ -251,7 +258,7 @@ class MainWindow(QMainWindow):
         trend.setObjectName("trendLabel")
         box.addWidget(trend)
         self.home_temp_plot, _, _ = self._plot(mini=True)
-        self.home_temp_plot.setFixedHeight(125)
+        self.home_temp_plot.setFixedHeight(82)
         box.addWidget(self.home_temp_plot)
         return card
 
@@ -291,7 +298,7 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_pump_card(self) -> ClickableCard:
-        card = self._clickable_card("pumpCard", 206, 94)
+        card = self._clickable_card("pumpCard", 206, 88)
         card.clicked.connect(self.show_pump_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(16, 12, 16, 10)
@@ -314,7 +321,7 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_timelapse_card(self) -> ClickableCard:
-        card = self._clickable_card("timelapseCard", 206, 94)
+        card = self._clickable_card("timelapseCard", 206, 88)
         card.clicked.connect(self.show_timelapse_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(16, 12, 16, 10)
@@ -333,14 +340,17 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_camera_card(self) -> ClickableCard:
-        card = self._clickable_card("cameraCard", 724, 348)
+        card = self._clickable_card("cameraCard", 724, 294)
         card.clicked.connect(self.show_camera_page)
         box = QVBoxLayout(card)
-        box.setContentsMargins(18, 14, 18, 16)
-        box.setSpacing(8)
+        box.setContentsMargins(18, 12, 18, 14)
+        box.setSpacing(6)
         row = QHBoxLayout()
         row.addWidget(self._caption("Camera preview"))
         row.addStretch()
+        self.home_camera_badge = QLabel("No image")
+        self.home_camera_badge.setObjectName("previewBadge")
+        row.addWidget(self.home_camera_badge)
         row.addWidget(self._small_text("Tap to open camera screen"))
         box.addLayout(row)
         self.home_camera_preview = self._camera_view("USB camera not connected", "cameraPreview")
@@ -350,9 +360,9 @@ class MainWindow(QMainWindow):
     def _home_actions(self) -> QHBoxLayout:
         actions = QHBoxLayout()
         actions.setSpacing(14)
-        self.stop_button = self._button("STOP", "stopButtonCompact", 330, 62)
-        self.clear_button = self._button("CLEAR ERROR", "secondaryButton", 260, 62)
-        self.refresh_button = self._button("REFRESH STATUS", "secondaryButton", 286, 62)
+        self.stop_button = self._button("STOP", "stopButtonCompact", 330, 52)
+        self.clear_button = self._button("CLEAR ERROR", "secondaryButton", 260, 52)
+        self.refresh_button = self._button("REFRESH STATUS", "secondaryButton", 286, 52)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_error)
         self.refresh_button.clicked.connect(self._refresh)
@@ -898,7 +908,13 @@ class MainWindow(QMainWindow):
         preview_box = QVBoxLayout(self.test_photo_preview_card)
         preview_box.setContentsMargins(18, 18, 18, 18)
         preview_box.setSpacing(8)
-        preview_box.addWidget(self._caption_large("Live camera"))
+        preview_header = QHBoxLayout()
+        preview_header.addWidget(self._caption_large("Camera preview"))
+        preview_header.addStretch()
+        self.timelapse_camera_badge = QLabel("No image")
+        self.timelapse_camera_badge.setObjectName("previewBadge")
+        preview_header.addWidget(self.timelapse_camera_badge)
+        preview_box.addLayout(preview_header)
         self.timelapse_live_preview = self._camera_view("Live video stopped", "cameraPreview")
         preview_box.addWidget(self.timelapse_live_preview, 1)
         body.addWidget(self.test_photo_preview_card)
@@ -920,8 +936,17 @@ class MainWindow(QMainWindow):
         root, layout = self._page_root()
         nav = QHBoxLayout()
         self.camera_back_button = self._button("BACK", "secondaryButton", 120, 56)
+        self.camera_start_live_button = self._button("START LIVE", "okButton", 180, 56)
+        self.camera_stop_live_button = self._button("STOP LIVE", "secondaryButton", 180, 56)
+        self.camera_preview_badge = QLabel("No image")
+        self.camera_preview_badge.setObjectName("previewBadge")
         self.camera_back_button.clicked.connect(self.show_home_page)
+        self.camera_start_live_button.clicked.connect(self._start_live_video)
+        self.camera_stop_live_button.clicked.connect(self._stop_live_video)
         nav.addWidget(self.camera_back_button)
+        nav.addWidget(self.camera_start_live_button)
+        nav.addWidget(self.camera_stop_live_button)
+        nav.addWidget(self.camera_preview_badge)
         nav.addStretch()
         layout.addLayout(nav)
         self.camera_preview = self._camera_view("USB camera not connected", "cameraFullPreview")
@@ -932,8 +957,8 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("appRoot")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(8)
         return root, layout
 
     def _header(self, title: str) -> QHBoxLayout:
@@ -1141,10 +1166,21 @@ class MainWindow(QMainWindow):
         self._camera.errorOccurred.connect(lambda *_: self._set_camera_text("Camera error"))
         self._camera_session.setCamera(self._camera)
         self._camera_session.setVideoSink(self._camera_sink)
-        self._set_camera_text(f"USB camera: {devices[0].description()}")
-        self._camera.start()
         self._camera_mode = mode
-        self.controller.logs.append("live video started" if mode == "live" else "timelapse camera started")
+        if mode == "timelapse":
+            if self._preview_image().isNull():
+                self._set_camera_text("Waiting for first timelapse image")
+            else:
+                self._refresh_camera_previews()
+        else:
+            self._set_camera_text(f"USB camera: {devices[0].description()}")
+        self._camera.start()
+        message = {
+            "live": "live video started",
+            "timelapse": "timelapse camera started",
+            "test_capture": "test capture camera started",
+        }.get(mode, "camera started")
+        self.controller.logs.append(message)
         return True
 
     def _stop_camera(self, text: str, log_message: str | None = None) -> None:
@@ -1158,7 +1194,11 @@ class MainWindow(QMainWindow):
         self._camera_mode = "idle"
         with self._camera_image_lock:
             self._camera_image = QImage()
-        self._set_camera_text(text)
+            has_last_picture = not self._last_picture_image.isNull()
+        if has_last_picture:
+            self._paint_camera_image()
+        else:
+            self._set_camera_text(text)
 
     def _set_camera_text(self, text: str) -> None:
         previews = (
@@ -1178,11 +1218,12 @@ class MainWindow(QMainWindow):
             return
         with self._camera_image_lock:
             self._camera_image = image.copy()
+        if self._camera_mode == "timelapse":
+            return
         self._paint_camera_image()
 
     def _paint_camera_image(self) -> None:
-        with self._camera_image_lock:
-            image = self._camera_image.copy()
+        image = self._preview_image()
         if image.isNull():
             return
         pixmap = QPixmap.fromImage(image)
@@ -1202,15 +1243,88 @@ class MainWindow(QMainWindow):
             preview.setText("")
             preview.setPixmap(scaled.copy(x, y, preview.width(), preview.height()))
 
+    def _preview_image(self) -> QImage:
+        with self._camera_image_lock:
+            if self._camera_mode in {"live", "test_capture"} and not self._camera_image.isNull():
+                return self._camera_image.copy()
+            return self._last_picture_image.copy()
+
     def _save_camera_image(self, destination: Path) -> Path:
         with self._camera_image_lock:
             image = self._camera_image.copy()
         if image.isNull():
-            raise RuntimeError("no camera frame available; start live video and wait for an image")
+            raise RuntimeError("no camera frame available")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not image.save(str(destination), "JPG"):
             raise RuntimeError(f"camera image save failed: {destination}")
+        with self._camera_image_lock:
+            self._last_picture_image = image.copy()
+            self._last_picture_path = str(destination)
+        self.preview_refresh_requested.emit()
         return destination
+
+    def _load_latest_picture_preview(self) -> None:
+        files: list[Path] = []
+        for mode in ("internal", "external"):
+            base = self.timelapse_service.resolve_storage_path(mode)
+            if not base.exists():
+                continue
+            try:
+                files.extend(base.glob("test_capture_*.jpg"))
+                files.extend(base.glob("timelapse_*/img_*.jpg"))
+            except OSError:
+                continue
+        if not files:
+            return
+        try:
+            latest = max(files, key=lambda path: path.stat().st_mtime)
+        except OSError:
+            return
+        image = QImage(str(latest))
+        if image.isNull():
+            return
+        with self._camera_image_lock:
+            self._last_picture_image = image
+            self._last_picture_path = str(latest)
+
+    def _has_camera_frame(self) -> bool:
+        with self._camera_image_lock:
+            return not self._camera_image.isNull()
+
+    def _wait_for_camera_frame(self, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._has_camera_frame():
+                return True
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+        return self._has_camera_frame()
+
+    def _run_capture_with_events(self, settings: TimelapseSettings) -> bool:
+        result = {"ok": False}
+
+        def worker() -> None:
+            result["ok"] = self.timelapse_service.test_capture(settings)
+
+        thread = threading.Thread(target=worker, name="MicroplaiteTestCapture", daemon=True)
+        thread.start()
+        while thread.is_alive():
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+        return result["ok"]
+
+    def _refresh_camera_previews(self) -> None:
+        self._render_preview_badges()
+        self._paint_camera_image()
+
+    def _live_neopixel_on(self) -> None:
+        brightness_widget = getattr(self, "test_brightness_spin", None)
+        if brightness_widget is not None:
+            self.controller.timelapse_neopixel_brightness(int(brightness_widget.value()))
+        self.controller.timelapse_neopixel_on()
+
+    def _live_neopixel_off(self) -> None:
+        self.controller.timelapse_neopixel_off()
 
     def show_home_page(self) -> None:
         self.pages.setCurrentIndex(self.PAGE_HOME)
@@ -1357,25 +1471,49 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _test_capture(self) -> None:
-        if self._camera_mode != "live" or not self.timelapse_service.snapshot().live_running:
-            self._set_timelapse_notice("Start live video before test capture")
+        snap = self.timelapse_service.snapshot()
+        if snap.running or self._camera_mode == "timelapse":
+            self._set_timelapse_notice("Stop timelapse before test capture")
+            self._render()
+            return
+        if snap.live_running or self._camera_mode == "live":
+            self._set_timelapse_notice("Stop live video before test capture")
+            self._render()
+            return
+        if self._camera is not None or self._camera_mode != "idle":
+            self._set_timelapse_notice("Camera already active")
             self._render()
             return
         self._timelapse_notice = ""
-        self.timelapse_service.test_capture(self._timelapse_settings())
-        self._render()
+        if not self._start_usb_camera("test_capture"):
+            self._set_timelapse_notice("Camera unavailable; test capture not started")
+            self._render()
+            return
+        try:
+            if not self._wait_for_camera_frame():
+                self._set_timelapse_notice("No camera frame received; test capture cancelled")
+                return
+            self._run_capture_with_events(self._timelapse_settings())
+        finally:
+            if self._camera_mode == "test_capture":
+                self._stop_camera("Test capture camera stopped", "test capture camera stopped")
+            self._render()
 
     def _start_live_video(self) -> None:
         snap = self.timelapse_service.snapshot()
-        if snap.running or self._camera_mode == "timelapse":
+        if snap.running or self._camera_mode in {"timelapse", "test_capture"}:
             if snap.running:
                 self.timelapse_service.set_live_running(True)
-            self._set_timelapse_notice("Stop timelapse before starting live video")
+            if self._camera_mode == "test_capture":
+                self._set_timelapse_notice("Wait for test capture before starting live video")
+            else:
+                self._set_timelapse_notice("Stop timelapse before starting live video")
             self._render()
             return
         if self._camera is not None and self._camera_mode == "live":
             if self.timelapse_service.set_live_running(True):
                 self._timelapse_notice = ""
+                self._live_neopixel_on()
             self._render()
             return
         if self._camera is not None:
@@ -1385,6 +1523,7 @@ class MainWindow(QMainWindow):
         if self._start_usb_camera("live"):
             if self.timelapse_service.set_live_running(True):
                 self._timelapse_notice = ""
+                self._live_neopixel_on()
         else:
             self.timelapse_service.set_live_running(False)
             self._set_timelapse_notice("Camera unavailable; live video not started")
@@ -1402,6 +1541,7 @@ class MainWindow(QMainWindow):
         elif self._camera is not None:
             self._stop_camera("Live video stopped")
         self.timelapse_service.set_live_running(False)
+        self._live_neopixel_off()
         self._timelapse_notice = ""
         self._render()
 
@@ -1611,11 +1751,13 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(controls_enabled and not settings.infinite)
 
-        self.start_timelapse_button.setEnabled(controls_enabled and not live_active)
+        self.start_timelapse_button.setEnabled(controls_enabled and not live_active and self._camera_mode != "test_capture")
         self.stop_timelapse_button.setEnabled(snap.running or snap.capture_in_progress)
-        self.start_live_button.setEnabled(not live_active and not snap.running and self._camera_mode != "timelapse")
+        self.start_live_button.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
         self.stop_live_button.setEnabled(live_active)
-        self.test_capture_button.setEnabled(live_active and not snap.running and not snap.capture_in_progress)
+        self.test_capture_button.setEnabled(
+            not live_active and not snap.running and not snap.capture_in_progress and self._camera_mode == "idle"
+        )
         for widget in (
             self.test_neopixel_on_button,
             self.test_neopixel_off_button,
@@ -1629,7 +1771,33 @@ class MainWindow(QMainWindow):
         )
 
     def _render_camera(self, state: AppState) -> None:
+        snap = self.timelapse_service.snapshot()
+        live_active = snap.live_running and self._camera_mode == "live"
+        self.camera_start_live_button.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
+        self.camera_stop_live_button.setEnabled(live_active)
+        self._render_preview_badges()
         self._paint_camera_image()
+
+    def _render_preview_badges(self) -> None:
+        text = self._preview_badge_text()
+        with self._camera_image_lock:
+            path = self._last_picture_path
+        tooltip = path if text == "Last picture" and path else ""
+        for label in (
+            self.home_camera_badge,
+            self.timelapse_camera_badge,
+            self.camera_preview_badge,
+        ):
+            label.setText(text)
+            label.setToolTip(tooltip)
+
+    def _preview_badge_text(self) -> str:
+        if self._camera_mode in {"live", "test_capture"}:
+            return "Live"
+        with self._camera_image_lock:
+            if not self._last_picture_image.isNull():
+                return "Last picture"
+        return "No image"
 
     def _render_plots(self, state: AppState) -> None:
         history = list(state.temp_history)
