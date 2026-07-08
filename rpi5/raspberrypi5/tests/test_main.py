@@ -236,6 +236,24 @@ def test_pump_controls_send_esp32_commands() -> None:
     ]
 
 
+def test_pump_target_accepts_decimal_rpm() -> None:
+    client = RecordingClient()
+    controller = AppController(client)
+
+    controller.set_pump_target_rpm(9.9)
+    controller.start_pump()
+    controller.set_pump_target_rpm(9.8)
+
+    assert controller.state.pump.target_rpm == 9.8
+    assert controller.state.pump.actual_rpm == 9.8
+    assert client.commands == [
+        "PUMP_START 9.9",
+        "PUMP_STATUS",
+        "PUMP_SET_RPM 9.8",
+        "PUMP_STATUS",
+    ]
+
+
 def test_start_pump_updates_state_from_serial_response() -> None:
     client = RecordingClient()
     controller = AppController(client)
@@ -313,7 +331,7 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.width() == SCREEN_WIDTH
     assert window.height() == SCREEN_HEIGHT
     assert window.log_view.height() <= 80
-    assert window.stop_button.height() >= 110
+    assert window.stop_button.height() >= 60
     assert window.start_button.isVisible()
     assert window.start_button.width() == 200
     assert window.start_button.sizeHint().width() <= window.start_button.width()
@@ -327,9 +345,10 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.home_heater.sizeHint().height() <= window.home_heater.height()
     assert window.home_heater.x() == window.start_button.x()
     assert window.home_heater.y() > window.start_button.geometry().bottom()
-    assert window.home_system_status.isVisible()
+    assert not hasattr(window, "home_system_status")
     camera_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "cameraCard"]
-    assert camera_cards[0].height() == 270
+    assert camera_cards[0].width() >= 700
+    assert camera_cards[0].height() >= 340
     window._camera_image = QImage(320, 240, QImage.Format.Format_RGB32)
     window._camera_image.fill(0x216EE5)
     window._paint_camera_image()
@@ -338,6 +357,9 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.stop_button.isVisible()
     assert window.clear_button.isVisible()
     assert window.refresh_button.isVisible()
+    assert window.stop_button.y() > camera_cards[0].geometry().bottom()
+    assert window.clear_button.y() == window.stop_button.y()
+    assert window.refresh_button.y() == window.stop_button.y()
 
 
 def test_main_window_starts_status_then_log_on_when_connected() -> None:
@@ -375,6 +397,62 @@ def test_home_pid_button_starts_and_stops_pid() -> None:
 
     assert window.start_button.text() == "START"
     assert client.commands == ["PID_OFF"]
+
+
+def test_temperature_dashboard_has_pid_controls_and_no_footer_cards() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show_temperature_page()
+    window.show()
+    app.processEvents()
+
+    assert window.temperature_start_button.isVisible()
+    assert window.temperature_target_minus_button.isVisible()
+    assert window.temperature_target_plus_button.isVisible()
+    assert window.temperature_target_minus_button.width() >= 56
+    assert window.temperature_target_plus_button.height() >= 50
+    target_card = window.temperature_target_minus_button.parentWidget()
+    assert window.temperature_target_minus_button.geometry().bottom() <= target_card.height()
+    assert window.temperature_target_plus_button.geometry().bottom() <= target_card.height()
+    assert window.temperature_plot.height() >= 340
+    assert not hasattr(window, "temperature_mode")
+    assert not hasattr(window, "temperature_sensor")
+    assert not hasattr(window, "temperature_fault")
+    assert not hasattr(window, "temperature_error")
+    page_text = "\n".join(label.text() for label in window.temperature_page.findChildren(QLabel))
+    assert "Mode" not in page_text
+    assert "Last error" not in page_text
+
+
+def test_temperature_dashboard_controls_pid_and_setpoint() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    client = RecordingClient()
+    window = MainWindow(AppController(client))
+    window.timer.stop()
+    window.show_temperature_page()
+    client.commands.clear()
+
+    window.temperature_target_plus_button.click()
+
+    assert window.controller.state.target_c == 37.6
+    assert window.temperature_target_value.text() == "37.60 °C"
+    assert client.commands == ["SET_TARGET 37.60"]
+
+    client.commands.clear()
+    window.temperature_start_button.click()
+
+    assert window.temperature_start_button.text() == "STOP PID"
+    assert window.start_button.text() == "STOP PID"
+    assert client.commands == [
+        "CLEAR_ERROR",
+        "SET_TARGET 37.60",
+        "SET_PID 8 0.03 20",
+        "SET_PID_LIMIT 15",
+        "PID_ON",
+        "STATUS",
+        "LOG_ON 200",
+    ]
 
 
 def test_navigation_methods_select_expected_pages() -> None:
@@ -424,9 +502,6 @@ def test_status_pills_are_compact() -> None:
     app.processEvents()
 
     for pill in window._status_pills:
-        if pill is window.home_system_status:
-            assert pill.width() <= 252
-            continue
         assert pill.width() <= 180
         assert pill.height() <= 50
 
@@ -445,8 +520,160 @@ def test_timelapse_page_replaces_neopixel_card_and_shows_controls() -> None:
     assert window.light_duration_spin.value() == 1.0
     assert window.home_timelapse_status.text() == "Stopped"
     assert "Path:" in window.timelapse_path.text()
+    assert window.timelapse_stack.currentIndex() == 0
     texts = {button.text() for button in window.timelapse_page.findChildren(QPushButton)}
-    assert {"START TIMELAPSE", "STOP", "TEST CAPTURE", "START LIVE VIDEO", "STOP LIVE VIDEO"} <= texts
+    assert {
+        "ACQUISITION",
+        "TEST PHOTO",
+        "START TIMELAPSE",
+        "STOP",
+        "STOP TIMELAPSE",
+        "TEST CAPTURE",
+        "START LIVE",
+        "STOP LIVE",
+        "ON",
+        "OFF",
+    } <= texts
+
+    window._show_timelapse_tab(1)
+
+    assert window.timelapse_stack.currentIndex() == 1
+    assert window.timelapse_test_tab.objectName() == "tabButtonActive"
+    assert window.timelapse_acquisition_tab.objectName() == "tabButton"
+
+
+def test_timelapse_fields_use_large_step_buttons() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    for button in (
+        window.interval_minus_button,
+        window.interval_plus_button,
+        window.timelapse_brightness_minus_button,
+        window.timelapse_brightness_plus_button,
+        window.light_duration_minus_button,
+        window.light_duration_plus_button,
+        window.total_duration_minus_button,
+        window.total_duration_plus_button,
+        window.test_brightness_minus_button,
+        window.test_brightness_plus_button,
+    ):
+        assert button.width() >= 56
+        assert button.height() >= 44
+
+
+def test_timelapse_step_buttons_update_numeric_fields() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    window.interval_plus_button.click()
+    assert window.interval_spin.value() == 11
+    window.interval_minus_button.click()
+    assert window.interval_spin.value() == 10
+
+    window.timelapse_brightness_plus_button.click()
+    assert window.timelapse_brightness_spin.value() == 81
+    assert window.test_brightness_spin.value() == 81
+
+    window.light_duration_minus_button.click()
+    assert window.light_duration_spin.value() == 0.9
+    window.light_duration_plus_button.click()
+    assert window.light_duration_spin.value() == 1.0
+
+    window.total_duration_minus_button.click()
+    assert window.total_duration_spin.value() == 59
+    window.total_duration_plus_button.click()
+    assert window.total_duration_spin.value() == 60
+
+    window._show_timelapse_tab(1)
+    window.test_brightness_minus_button.click()
+    assert window.timelapse_brightness_spin.value() == 80
+    assert window.test_brightness_spin.value() == 80
+
+
+def test_timelapse_start_refuses_when_live_video_is_active() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    assert window.timelapse_service.set_live_running(True) is True
+    window._camera_mode = "live"
+    window._start_timelapse()
+
+    snap = window.timelapse_service.snapshot()
+    assert snap.running is False
+    assert snap.live_running is True
+    assert "Stop live video before starting timelapse" in window.timelapse_error.text()
+    assert "Stop live video before starting timelapse" in window.controller.logs
+
+
+def test_live_video_start_refuses_when_timelapse_is_active() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    window.timelapse_service._set_snapshot(running=True, status="timelapse running")
+    window._camera_mode = "timelapse"
+    window._start_live_video()
+
+    snap = window.timelapse_service.snapshot()
+    assert snap.running is True
+    assert snap.live_running is False
+    assert "Stop timelapse before starting live video" in window.timelapse_error.text()
+    assert "Stop timelapse before starting live video" in window.controller.logs
+
+
+def test_test_capture_requires_live_video() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    window._show_timelapse_tab(1)
+    window._test_capture()
+
+    assert window.timelapse_service.snapshot().last_file == ""
+    assert "Start live video before test capture" in window.timelapse_error.text()
+    assert "Start live video before test capture" in window.controller.logs
+
+
+def test_timelapse_stop_button_stays_visible_on_both_tabs() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show_timelapse_page()
+    window.show()
+    app.processEvents()
+
+    for index in (0, 1):
+        window._show_timelapse_tab(index)
+        app.processEvents()
+        assert window.stop_timelapse_button.text() == "STOP TIMELAPSE"
+        assert window.stop_timelapse_button.isVisible()
+        assert window.stop_timelapse_button.x() < 900
+
+
+def test_timelapse_cards_and_bottom_buttons_fit_screen() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show_timelapse_page()
+    window.show()
+    app.processEvents()
+
+    assert window.timelapse_acquisition_card.geometry().bottom() <= window.timelapse_page.height()
+    assert window.timelapse_status_card.geometry().bottom() <= window.timelapse_page.height()
+    assert window.start_timelapse_button.geometry().bottom() <= window.start_timelapse_button.parentWidget().height()
+
+    window._show_timelapse_tab(1)
+    app.processEvents()
+
+    assert window.test_photo_controls_card.geometry().bottom() <= window.timelapse_page.height()
+    assert window.test_photo_preview_card.geometry().bottom() <= window.timelapse_page.height()
+    assert window.test_capture_button.geometry().bottom() <= window.test_capture_button.parentWidget().height()
+    assert window.start_live_button.sizeHint().width() <= window.start_live_button.width()
+    assert window.stop_live_button.sizeHint().width() <= window.stop_live_button.width()
 
 
 def test_pump_page_controls_update_local_state_and_home_card() -> None:
@@ -466,6 +693,41 @@ def test_pump_page_controls_update_local_state_and_home_card() -> None:
     assert window.home_pump_status.text() == "Running"
     assert window.home_pump_rpm.text() == "75 RPM"
     assert client.commands == ["PUMP_START 75.0", "PUMP_STATUS"]
+
+
+def test_pump_page_large_step_buttons_use_fine_steps_below_10_rpm() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    window._set_pump_target_rpm(9.8)
+    window._nudge_pump_target(1)
+    assert window.controller.state.pump.target_rpm == 9.9
+    assert window.pump_spin.value() == 9.9
+    assert window.pump_target_rpm.text() == "9.9 RPM"
+
+    window._nudge_pump_target(1)
+    assert window.controller.state.pump.target_rpm == 10.0
+    assert window.pump_target_rpm.text() == "10 RPM"
+
+    window._nudge_pump_target(1)
+    assert window.controller.state.pump.target_rpm == 11.0
+    assert window.pump_target_rpm.text() == "11 RPM"
+
+    window._set_pump_target_rpm(10.0)
+    window._nudge_pump_target(-1)
+    assert window.controller.state.pump.target_rpm == 9.9
+
+
+def test_pump_page_uses_large_step_buttons() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    assert window.pump_minus_button.text() == "-"
+    assert window.pump_plus_button.text() == "+"
+    assert window.pump_minus_button.width() >= 90
+    assert window.pump_plus_button.height() >= 70
 
 
 def test_camera_page_contains_only_back_and_full_preview() -> None:

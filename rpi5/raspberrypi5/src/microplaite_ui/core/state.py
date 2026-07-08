@@ -42,7 +42,7 @@ class PumpState:
     supported: bool = False
     running: bool = False
     actual_rpm: float = 0.0
-    target_rpm: int = 50
+    target_rpm: float = 50.0
     direction: str = "forward"
     full_speed: bool = False
     readback: bool | None = None

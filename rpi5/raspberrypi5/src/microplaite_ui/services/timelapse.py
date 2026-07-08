@@ -93,21 +93,37 @@ class TimelapseService:
             snap.estimated_bytes = snap.estimated_frames * 2_000_000
         return snap
 
-    def set_live_running(self, running: bool) -> None:
+    def set_live_running(self, running: bool) -> bool:
         with self._lock:
             timelapse_running = self._snapshot.running
+        if running and timelapse_running:
+            message = "Stop timelapse before starting live video"
+            self._append_log(message)
+            self._set_snapshot(status="timelapse running", live_running=False)
+            return False
         if timelapse_running:
             status = "timelapse running"
         else:
             status = "live video active" if running else "stopped"
-        self._set_snapshot(live_running=running, status=status)
+        updates: dict[str, object] = {"live_running": running, "status": status}
+        if running:
+            updates["error"] = ""
+        self._set_snapshot(**updates)
+        return True
 
     def start(self, settings: TimelapseSettings) -> bool:
         settings = self._validated(settings)
         with self._lock:
-            if self._snapshot.running:
-                self._append_log("timelapse already running")
-                return False
+            already_running = self._snapshot.running
+            live_running = self._snapshot.live_running
+        if already_running:
+            self._append_log("timelapse already running")
+            return False
+        if live_running:
+            message = "Stop live video before starting timelapse"
+            self._append_log(message)
+            self._set_snapshot(status="live video active", error=message)
+            return False
         try:
             session_dir = self._create_session(settings)
         except Exception as exc:
