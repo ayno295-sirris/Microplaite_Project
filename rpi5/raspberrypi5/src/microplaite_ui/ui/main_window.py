@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from microplaite_ui.config import DEFAULT_LOG_PERIOD_MS, SCREEN_HEIGHT, SCREEN_WIDTH
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, derive_system_status
+from microplaite_ui.services.preferences import PreferencesStore, UserPreferences
 from microplaite_ui.services.timelapse import TimelapseService, TimelapseSettings
 from microplaite_ui.ui.styles import QSS
 
@@ -102,9 +103,11 @@ class MainWindow(QMainWindow):
     PAGE_TIMELAPSE = 4
     PAGE_CAMERA = 5
 
-    def __init__(self, controller: AppController) -> None:
+    def __init__(self, controller: AppController, preferences_store: PreferencesStore | None = None) -> None:
         super().__init__()
         self.controller = controller
+        self._preferences_store = preferences_store or PreferencesStore()
+        self._loading_preferences = False
         self._port_labels: list[QLabel] = []
         self._status_pills: list[QLabel] = []
         self._plot_curves: list[pg.PlotDataItem] = []
@@ -134,6 +137,7 @@ class MainWindow(QMainWindow):
         self._refresh()
         if self.controller.state.connected:
             self.controller.start_live_updates()
+        self._apply_preferences(self._preferences_store.load())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_serial)
         self.timer.start(DEFAULT_LOG_PERIOD_MS)
@@ -190,7 +194,7 @@ class MainWindow(QMainWindow):
         return root
 
     def _home_temperature_card(self) -> ClickableCard:
-        card = self._clickable_card("temperatureCard", 500, 390)
+        card = self._clickable_card("temperatureCard", 500, 410)
         card.clicked.connect(self.show_temperature_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(18, 14, 18, 12)
@@ -222,7 +226,7 @@ class MainWindow(QMainWindow):
         self.home_setpoint = QLabel("--.-- Â°C")
         self.home_setpoint.setObjectName("mediumValue")
         self.home_setpoint.setMinimumWidth(240)
-        self.home_setpoint.setFixedHeight(34)
+        self.home_setpoint.setFixedHeight(38)
         controls.addWidget(self.home_setpoint)
         nudge = QHBoxLayout()
         nudge.setSpacing(10)
@@ -703,8 +707,8 @@ class MainWindow(QMainWindow):
         self.interval_unit = QComboBox()
         self.interval_unit.addItem("seconds", 1)
         self.interval_unit.addItem("minutes", 60)
-        self.interval_spin.valueChanged.connect(self._render)
-        self.interval_unit.currentIndexChanged.connect(self._render)
+        self.interval_spin.valueChanged.connect(self._timelapse_form_changed)
+        self.interval_unit.currentIndexChanged.connect(self._timelapse_form_changed)
         interval_control = QHBoxLayout()
         interval_control.setSpacing(8)
         self.interval_minus_button = self._button("-", "fieldStepButton", 56, 44)
@@ -751,7 +755,7 @@ class MainWindow(QMainWindow):
         self.light_duration_spin.setSuffix(" s")
         self.light_duration_spin.setValue(1.0)
         self.light_duration_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.light_duration_spin.valueChanged.connect(self._render)
+        self.light_duration_spin.valueChanged.connect(self._timelapse_form_changed)
         light_duration_control = QHBoxLayout()
         light_duration_control.setSpacing(8)
         self.light_duration_minus_button = self._button("-", "fieldStepButton", 56, 44)
@@ -774,7 +778,7 @@ class MainWindow(QMainWindow):
         self.total_duration_spin.setSuffix(" min")
         self.total_duration_spin.setValue(60)
         self.total_duration_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.total_duration_spin.valueChanged.connect(self._render)
+        self.total_duration_spin.valueChanged.connect(self._timelapse_form_changed)
         self.infinite_check = QCheckBox("Infinite")
         self.infinite_check.toggled.connect(self._toggle_infinite)
         total_duration_control = QHBoxLayout()
@@ -1383,18 +1387,86 @@ class MainWindow(QMainWindow):
     def _nudge_target(self, delta: float) -> None:
         target = max(0.0, min(80.0, self.controller.state.target_c + delta))
         self.controller.set_target_from_ui(target)
+        self._save_preferences()
         self._render()
 
     def _unsupported_action(self, action) -> None:
         action()
         self._render()
 
+    def _apply_preferences(self, preferences: UserPreferences) -> None:
+        self._loading_preferences = True
+        try:
+            if self.controller.state.connected:
+                self.controller.set_target_from_ui(preferences.target_c)
+            else:
+                self.controller.state.target_c = preferences.target_c
+            self.controller.state.pump.target_rpm = preferences.pump_target_rpm
+            self.controller.state.neopixel.enabled = preferences.neopixel_enabled
+            self.controller.state.neopixel.brightness_percent = preferences.neopixel_brightness_percent
+            self._set_combo_data(self.storage_combo, preferences.timelapse_storage_mode)
+            self._set_combo_data(self.interval_unit, 60 if preferences.timelapse_interval_unit == "minutes" else 1)
+            self._set_widget_value(self.interval_spin, preferences.timelapse_interval_value)
+            self._set_widget_value(self.timelapse_brightness_spin, preferences.timelapse_brightness_percent)
+            self._set_widget_value(self.test_brightness_spin, preferences.timelapse_brightness_percent)
+            self._set_widget_value(self.light_duration_spin, preferences.timelapse_light_duration_s)
+            self._set_widget_value(self.total_duration_spin, preferences.timelapse_total_duration_min)
+            blocked = self.infinite_check.blockSignals(True)
+            self.infinite_check.setChecked(preferences.timelapse_infinite)
+            self.infinite_check.blockSignals(blocked)
+        finally:
+            self._loading_preferences = False
+        self._render()
+
+    def _collect_preferences(self) -> UserPreferences:
+        interval_unit = "minutes" if int(self.interval_unit.currentData()) == 60 else "seconds"
+        return UserPreferences(
+            target_c=round(float(self.controller.state.target_c), 2),
+            pump_target_rpm=round(float(self.controller.state.pump.target_rpm), 1),
+            neopixel_enabled=bool(self.controller.state.neopixel.enabled),
+            neopixel_brightness_percent=int(self.controller.state.neopixel.brightness_percent),
+            timelapse_storage_mode=str(self.storage_combo.currentData()),
+            timelapse_interval_value=int(self.interval_spin.value()),
+            timelapse_interval_unit=interval_unit,
+            timelapse_brightness_percent=int(self.timelapse_brightness_spin.value()),
+            timelapse_light_duration_s=round(float(self.light_duration_spin.value()), 1),
+            timelapse_total_duration_min=int(self.total_duration_spin.value()),
+            timelapse_infinite=self.infinite_check.isChecked(),
+        )
+
+    def _save_preferences(self) -> None:
+        if self._loading_preferences:
+            return
+        try:
+            self._preferences_store.save(self._collect_preferences())
+        except OSError as exc:
+            self.controller.logs.append(f"preferences save failed: {exc}")
+
+    def _set_combo_data(self, combo: QComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            return
+        blocked = combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(blocked)
+
+    def _set_widget_value(self, widget: QSpinBox | QDoubleSpinBox, value: int | float) -> None:
+        blocked = widget.blockSignals(True)
+        widget.setValue(value)
+        widget.blockSignals(blocked)
+
+    def _timelapse_form_changed(self) -> None:
+        self._save_preferences()
+        self._render()
+
     def _set_neopixel_enabled(self, enabled: bool) -> None:
         self.controller.set_neopixel_enabled(enabled)
+        self._save_preferences()
         self._render()
 
     def _set_neopixel_brightness(self, percent: int) -> None:
         self.controller.set_neopixel_brightness(percent)
+        self._save_preferences()
         self._render()
 
     def _set_timelapse_brightness_value(self, percent: int, send_to_esp32: bool) -> None:
@@ -1410,6 +1482,7 @@ class MainWindow(QMainWindow):
             widget.blockSignals(blocked)
         if send_to_esp32:
             self.controller.set_neopixel_brightness(percent)
+        self._save_preferences()
         self._render()
 
     def _nudge_numeric_field(self, spinbox: QSpinBox | QDoubleSpinBox, delta: float) -> None:
@@ -1431,9 +1504,11 @@ class MainWindow(QMainWindow):
 
     def _toggle_infinite(self, checked: bool) -> None:
         self.total_duration_spin.setEnabled(not checked)
+        self._save_preferences()
         self._render()
 
     def _refresh_timelapse_storage(self) -> None:
+        self._save_preferences()
         self._render()
 
     def _set_timelapse_notice(self, message: str) -> None:
@@ -1547,6 +1622,7 @@ class MainWindow(QMainWindow):
 
     def _set_pump_target_rpm(self, rpm: float) -> None:
         self.controller.set_pump_target_rpm(rpm)
+        self._save_preferences()
         self._render()
 
     def _nudge_pump_target(self, direction: int) -> None:
@@ -1843,6 +1919,7 @@ class MainWindow(QMainWindow):
         widget.style().polish(widget)
 
     def closeEvent(self, event) -> None:
+        self._save_preferences()
         self.timelapse_service.stop()
         self._stop_live_video()
         self.controller.timelapse_neopixel_off()

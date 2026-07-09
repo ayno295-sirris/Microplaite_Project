@@ -469,6 +469,41 @@ def test_temperature_dashboard_controls_pid_and_setpoint() -> None:
     ]
 
 
+def test_main_window_restores_user_preferences_between_sessions() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    first = MainWindow(AppController(FakeEsp32Client()))
+    first.timer.stop()
+
+    first._nudge_target(0.1)
+    first._set_pump_target_rpm(9.8)
+    first._set_neopixel_enabled(False)
+    first._set_neopixel_brightness(35)
+    first.storage_combo.setCurrentIndex(1)
+    first.interval_spin.setValue(7)
+    first.interval_unit.setCurrentIndex(1)
+    first._set_timelapse_brightness_value(42, send_to_esp32=False)
+    first.light_duration_spin.setValue(2.3)
+    first.total_duration_spin.setValue(90)
+    first.infinite_check.setChecked(True)
+    first._save_preferences()
+
+    second = MainWindow(AppController(FakeEsp32Client()))
+    second.timer.stop()
+
+    assert second.controller.state.target_c == 37.6
+    assert second.controller.state.pump.target_rpm == 9.8
+    assert second.controller.state.neopixel.enabled is False
+    assert second.controller.state.neopixel.brightness_percent == 35
+    assert second.storage_combo.currentData() == "external"
+    assert second.interval_spin.value() == 7
+    assert second.interval_unit.currentData() == 60
+    assert second.timelapse_brightness_spin.value() == 42
+    assert second.test_brightness_spin.value() == 42
+    assert second.light_duration_spin.value() == 2.3
+    assert second.total_duration_spin.value() == 90
+    assert second.infinite_check.isChecked() is True
+
+
 def test_navigation_methods_select_expected_pages() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow(AppController(FakeEsp32Client()))
