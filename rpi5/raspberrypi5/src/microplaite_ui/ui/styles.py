@@ -113,6 +113,15 @@ QLabel#bottomStatus {
     font-size: 14px;
 }
 
+QLabel#previewBadge {
+    background: #e5edf5;
+    border-radius: 11px;
+    color: #0f1a29;
+    font-size: 13px;
+    font-weight: 800;
+    padding: 3px 10px;
+}
+
 QFrame#card,
 QFrame#temperatureCard,
 QFrame#thermalCard,
@@ -241,15 +250,69 @@ QPushButton#secondaryButton:hover {
     background: #3c5065;
 }
 
+QPushButton#tabButton,
+QPushButton#tabButtonActive {
+    border-radius: 14px;
+    font-size: 16px;
+}
+
+QPushButton#tabButton {
+    background: #4a5e73;
+}
+
+QPushButton#tabButtonActive {
+    background: #216ee5;
+}
+
 QPushButton#smallDarkButton {
     background: #0f1a29;
     border-radius: 16px;
     font-size: 24px;
 }
 
+QPushButton#setpointButton {
+    background: #0f1a29;
+    border-radius: 18px;
+    font-size: 30px;
+}
+
+QPushButton#setpointButton:hover {
+    background: #1c2a3d;
+}
+
+QPushButton#setpointButtonCompact {
+    background: #0f1a29;
+    border-radius: 16px;
+    font-size: 27px;
+}
+
+QPushButton#setpointButtonCompact:hover {
+    background: #1c2a3d;
+}
+
 QPushButton#okButton {
     background: #148f52;
     font-size: 22px;
+}
+
+QPushButton#rpmStepButton {
+    background: #216ee5;
+    border-radius: 18px;
+    font-size: 42px;
+}
+
+QPushButton#rpmStepButton:hover {
+    background: #155fd2;
+}
+
+QPushButton#fieldStepButton {
+    background: #216ee5;
+    border-radius: 16px;
+    font-size: 31px;
+}
+
+QPushButton#fieldStepButton:hover {
+    background: #155fd2;
 }
 
 QPushButton:disabled {
@@ -308,6 +371,21 @@ QDoubleSpinBox:disabled,
 QComboBox:disabled {
     color: #4d5e73;
     background: #f5f8fb;
+}
+
+QDoubleSpinBox#rpmSpinBox {
+    min-height: 68px;
+    font-size: 28px;
+    font-weight: 800;
+    padding: 2px 18px;
+}
+
+QSpinBox#touchSpinBox,
+QDoubleSpinBox#touchSpinBox {
+    min-height: 48px;
+    font-size: 21px;
+    font-weight: 800;
+    padding: 2px 14px;
 }
 
 QCheckBox {

@@ -102,15 +102,15 @@ class AppController:
     def timelapse_neopixel_brightness(self, percent: int) -> None:
         self.set_neopixel_brightness(percent)
 
-    def set_pump_target_rpm(self, rpm: int) -> str:
-        self.state.pump.target_rpm = max(0, min(100, int(rpm)))
+    def set_pump_target_rpm(self, rpm: float) -> str:
+        self.state.pump.target_rpm = round(max(0.0, min(100.0, float(rpm))), 1)
         if self.state.pump.running:
             self.state.pump.readback = None
             self._call(lambda: self.client.pump_set_rpm(self.state.pump.target_rpm))
             self._poll_pump_status()
         return self.state.last_message
 
-    def set_pump_rpm(self, rpm: int) -> str:
+    def set_pump_rpm(self, rpm: float) -> str:
         return self.set_pump_target_rpm(rpm)
 
     def start_pump(self) -> str:
