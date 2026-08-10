@@ -9,12 +9,15 @@ import time
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import QCoreApplication, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import (
     QCamera,
+    QCameraFormat,
     QMediaCaptureSession,
     QMediaDevices,
+    QMediaFormat,
+    QMediaRecorder,
     QVideoFrame,
     QVideoSink,
 )
@@ -43,6 +46,7 @@ from microplaite_ui.config import DEFAULT_LOG_PERIOD_MS, SCREEN_HEIGHT, SCREEN_W
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, derive_system_status
 from microplaite_ui.services.preferences import PreferencesStore, UserPreferences
+from microplaite_ui.services.storage import ensure_writable, resolve_storage_path, stamp, unique_path
 from microplaite_ui.services.timelapse import TimelapseService, TimelapseSettings
 from microplaite_ui.ui.styles import QSS
 
@@ -53,6 +57,36 @@ class ClickableCard(QFrame):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class ZoomableCameraView(QLabel):
+    pan_requested = Signal(int, int)
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self._last_drag_pos: QPoint | None = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_drag_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._last_drag_pos is not None:
+            pos = event.position().toPoint()
+            delta = pos - self._last_drag_pos
+            self._last_drag_pos = pos
+            if not delta.isNull():
+                self.pan_requested.emit(delta.x(), delta.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_drag_pos = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
         super().mouseReleaseEvent(event)
 
 
@@ -96,6 +130,13 @@ class NeoRingPreview(QWidget):
 class MainWindow(QMainWindow):
     preview_refresh_requested = Signal()
 
+    CAMERA_HOME_PREVIEW_SIZE = (464, 348)
+    CAMERA_TEST_PREVIEW_SIZE = (468, 351)
+    CAMERA_FULL_PREVIEW_SIZE = (784, 588)
+    CAMERA_ZOOM_MIN = 1.0
+    CAMERA_ZOOM_MAX = 5.0
+    CAMERA_ZOOM_STEP = 0.25
+
     PAGE_HOME = 0
     PAGE_TEMPERATURE = 1
     PAGE_THERMAL = 2
@@ -112,13 +153,27 @@ class MainWindow(QMainWindow):
         self._status_pills: list[QLabel] = []
         self._plot_curves: list[pg.PlotDataItem] = []
         self._target_lines: list[pg.InfiniteLine] = []
+        self._logs_visible = False
         self._camera: QCamera | None = None
         self._camera_session: QMediaCaptureSession | None = None
         self._camera_sink: QVideoSink | None = None
+        self._video_recorder: QMediaRecorder | None = None
+        self._picamera: object | None = None
+        self._picamera_timer = QTimer(self)
+        self._picamera_timer.timeout.connect(self._capture_picamera_frame)
+        self._picamera_capture_lock = threading.Lock()
+        self._picamera_error_logged = False
+        self._camera_backend = "idle"
         self._camera_mode = "idle"
         self._camera_image = QImage()
+        self._camera_frame_logged = False
+        self._camera_zoom = self.CAMERA_ZOOM_MIN
+        self._camera_pan_x = 0.0
+        self._camera_pan_y = 0.0
         self._last_picture_image = QImage()
         self._last_picture_path = ""
+        self._video_recording_path = ""
+        self._last_video_path = ""
         self._camera_image_lock = threading.Lock()
         self._timelapse_notice = ""
         self.timelapse_service = TimelapseService(
@@ -169,16 +224,15 @@ class MainWindow(QMainWindow):
         body.setSpacing(14)
         body.addWidget(self._home_temperature_card())
 
-        middle = QVBoxLayout()
-        middle.setSpacing(8)
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(14)
-        preview_row.addWidget(self._home_pump_card())
-        preview_row.addWidget(self._home_timelapse_card())
-        middle.addLayout(preview_row)
-        middle.addWidget(self._home_camera_card())
-        middle.addStretch()
-        body.addLayout(middle)
+        body.addWidget(self._home_camera_card())
+
+        side = QVBoxLayout()
+        side.setSpacing(14)
+        side.addSpacing(66)
+        side.addWidget(self._home_pump_card())
+        side.addWidget(self._home_timelapse_card())
+        side.addStretch()
+        body.addLayout(side)
         layout.addLayout(body)
         layout.addLayout(self._home_actions())
 
@@ -190,11 +244,12 @@ class MainWindow(QMainWindow):
         self.log_view.setObjectName("logBox")
         self.log_view.setReadOnly(True)
         self.log_view.setFixedHeight(54)
+        self.log_view.setVisible(self._logs_visible)
         layout.addWidget(self.log_view)
         return root
 
     def _home_temperature_card(self) -> ClickableCard:
-        card = self._clickable_card("temperatureCard", 500, 410)
+        card = self._clickable_card("temperatureCard", 464, 430)
         card.clicked.connect(self.show_temperature_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(18, 14, 18, 12)
@@ -216,17 +271,17 @@ class MainWindow(QMainWindow):
 
         self.home_temp_value = QLabel("--.- °C")
         self.home_temp_value.setObjectName("temperatureValue")
-        self.home_temp_value.setMinimumWidth(420)
+        self.home_temp_value.setMinimumWidth(400)
         temp_box.addWidget(self.home_temp_value)
         summary.addLayout(temp_box)
 
         controls = QVBoxLayout()
         controls.setSpacing(5)
         controls.addWidget(self._small_text("Setpoint"))
-        self.home_setpoint = QLabel("--.-- Â°C")
+        self.home_setpoint = QLabel("--.-- °C")
         self.home_setpoint.setObjectName("mediumValue")
         self.home_setpoint.setMinimumWidth(240)
-        self.home_setpoint.setFixedHeight(38)
+        self.home_setpoint.setFixedHeight(44)
         controls.addWidget(self.home_setpoint)
         nudge = QHBoxLayout()
         nudge.setSpacing(10)
@@ -302,7 +357,7 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_pump_card(self) -> ClickableCard:
-        card = self._clickable_card("pumpCard", 206, 88)
+        card = self._clickable_card("pumpCard", 232, 118)
         card.clicked.connect(self.show_pump_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(16, 12, 16, 10)
@@ -325,7 +380,7 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_timelapse_card(self) -> ClickableCard:
-        card = self._clickable_card("timelapseCard", 206, 88)
+        card = self._clickable_card("timelapseCard", 232, 118)
         card.clicked.connect(self.show_timelapse_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(16, 12, 16, 10)
@@ -344,7 +399,7 @@ class MainWindow(QMainWindow):
         return card
 
     def _home_camera_card(self) -> ClickableCard:
-        card = self._clickable_card("cameraCard", 724, 294)
+        card = self._clickable_card("cameraCard", 516, 430)
         card.clicked.connect(self.show_camera_page)
         box = QVBoxLayout(card)
         box.setContentsMargins(18, 12, 18, 14)
@@ -358,7 +413,8 @@ class MainWindow(QMainWindow):
         row.addWidget(self._small_text("Tap to open camera screen"))
         box.addLayout(row)
         self.home_camera_preview = self._camera_view("USB camera not connected", "cameraPreview")
-        box.addWidget(self.home_camera_preview, 1)
+        self.home_camera_preview.setFixedSize(*self.CAMERA_HOME_PREVIEW_SIZE)
+        box.addWidget(self.home_camera_preview, 1, Qt.AlignCenter)
         return card
 
     def _home_actions(self) -> QHBoxLayout:
@@ -366,11 +422,11 @@ class MainWindow(QMainWindow):
         actions.setSpacing(14)
         self.stop_button = self._button("STOP", "stopButtonCompact", 330, 52)
         self.clear_button = self._button("CLEAR ERROR", "secondaryButton", 260, 52)
-        self.refresh_button = self._button("REFRESH STATUS", "secondaryButton", 286, 52)
+        self.logs_button = self._button("LOGS", "secondaryButton", 150, 52)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_error)
-        self.refresh_button.clicked.connect(self._refresh)
-        for button in (self.stop_button, self.clear_button, self.refresh_button):
+        self.logs_button.clicked.connect(self._toggle_logs)
+        for button in (self.stop_button, self.clear_button, self.logs_button):
             actions.addWidget(button)
         actions.addStretch()
         return actions
@@ -865,6 +921,20 @@ class MainWindow(QMainWindow):
         live_controls.addWidget(self.stop_live_button)
         controls.addLayout(live_controls)
 
+        self.test_record_video_check = QCheckBox("Record video")
+        self.test_record_video_check.toggled.connect(self._set_record_video_enabled)
+        self.test_video_storage_combo = self._video_storage_combo()
+        self.test_video_storage_combo.currentIndexChanged.connect(self._set_video_storage_from_test)
+        video_controls = QHBoxLayout()
+        video_controls.setSpacing(8)
+        video_controls.addWidget(self.test_record_video_check)
+        video_controls.addWidget(self.test_video_storage_combo, 1)
+        controls.addLayout(video_controls)
+        self.test_video_status = QLabel("Video: display only")
+        self.test_video_status.setObjectName("tinyText")
+        self.test_video_status.setWordWrap(True)
+        controls.addWidget(self.test_video_status)
+
         controls.addWidget(self._small_text("NeoPixel"))
         self.test_neopixel_status = QLabel("NeoPixel ON")
         self.test_neopixel_status.setObjectName("footerValue")
@@ -908,7 +978,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.test_capture_button)
         body.addWidget(self.test_photo_controls_card)
 
-        self.test_photo_preview_card = self._plain_card("card", width=768, height=420)
+        self.test_photo_preview_card = self._plain_card("card", width=540, height=420)
         preview_box = QVBoxLayout(self.test_photo_preview_card)
         preview_box.setContentsMargins(18, 18, 18, 18)
         preview_box.setSpacing(8)
@@ -920,7 +990,8 @@ class MainWindow(QMainWindow):
         preview_header.addWidget(self.timelapse_camera_badge)
         preview_box.addLayout(preview_header)
         self.timelapse_live_preview = self._camera_view("Live video stopped", "cameraPreview")
-        preview_box.addWidget(self.timelapse_live_preview, 1)
+        self.timelapse_live_preview.setFixedSize(*self.CAMERA_TEST_PREVIEW_SIZE)
+        preview_box.addWidget(self.timelapse_live_preview, 1, Qt.AlignCenter)
         body.addWidget(self.test_photo_preview_card)
         body.addStretch()
         return root
@@ -944,17 +1015,40 @@ class MainWindow(QMainWindow):
         self.camera_stop_live_button = self._button("STOP LIVE", "secondaryButton", 180, 56)
         self.camera_preview_badge = QLabel("No image")
         self.camera_preview_badge.setObjectName("previewBadge")
+        self.camera_zoom_out_button = self._button("-", "smallDarkButton", 52, 46)
+        self.camera_zoom_in_button = self._button("+", "smallDarkButton", 52, 46)
+        self.camera_zoom_label = QLabel("100%")
+        self.camera_zoom_label.setObjectName("previewBadge")
         self.camera_back_button.clicked.connect(self.show_home_page)
         self.camera_start_live_button.clicked.connect(self._start_live_video)
         self.camera_stop_live_button.clicked.connect(self._stop_live_video)
+        self.camera_zoom_out_button.clicked.connect(self._zoom_camera_out)
+        self.camera_zoom_in_button.clicked.connect(self._zoom_camera_in)
         nav.addWidget(self.camera_back_button)
         nav.addWidget(self.camera_start_live_button)
         nav.addWidget(self.camera_stop_live_button)
         nav.addWidget(self.camera_preview_badge)
+        nav.addWidget(self.camera_zoom_out_button)
+        nav.addWidget(self.camera_zoom_label)
+        nav.addWidget(self.camera_zoom_in_button)
         nav.addStretch()
         layout.addLayout(nav)
-        self.camera_preview = self._camera_view("USB camera not connected", "cameraFullPreview")
-        layout.addWidget(self.camera_preview, 1)
+        video_row = QHBoxLayout()
+        video_row.setSpacing(10)
+        self.camera_record_video_check = QCheckBox("Record video")
+        self.camera_record_video_check.toggled.connect(self._set_record_video_enabled)
+        self.camera_video_storage_combo = self._video_storage_combo()
+        self.camera_video_storage_combo.currentIndexChanged.connect(self._set_video_storage_from_camera)
+        self.camera_video_status = QLabel("Video: display only")
+        self.camera_video_status.setObjectName("tinyText")
+        self.camera_video_status.setWordWrap(True)
+        video_row.addWidget(self.camera_record_video_check)
+        video_row.addWidget(self.camera_video_storage_combo)
+        video_row.addWidget(self.camera_video_status, 1)
+        layout.addLayout(video_row)
+        self.camera_preview = self._camera_view("USB camera not connected", "cameraFullPreview", zoomable=True)
+        self.camera_preview.setFixedSize(*self.CAMERA_FULL_PREVIEW_SIZE)
+        layout.addWidget(self.camera_preview, 1, Qt.AlignCenter)
         return root
 
     def _page_root(self) -> tuple[QWidget, QVBoxLayout]:
@@ -1147,15 +1241,88 @@ class MainWindow(QMainWindow):
         self._target_lines.append(target)
         return plot, curve, target
 
-    def _camera_view(self, text: str, object_name: str) -> QLabel:
-        label = QLabel(text)
+    def _camera_view(self, text: str, object_name: str, zoomable: bool = False) -> QLabel:
+        label = ZoomableCameraView(text) if zoomable else QLabel(text)
         label.setObjectName(object_name)
         label.setAlignment(Qt.AlignCenter)
         label.setWordWrap(True)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        if isinstance(label, ZoomableCameraView):
+            label.pan_requested.connect(self._pan_camera_preview)
         return label
 
-    def _start_usb_camera(self, mode: str) -> bool:
+    def _video_storage_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem("Internal Raspberry Pi", "internal")
+        combo.addItem("External disk", "external")
+        return combo
+
+    def _start_usb_camera(self, mode: str, require_qt_recorder: bool = False) -> bool:
+        if not require_qt_recorder and self._start_picamera2_camera(mode):
+            return True
+        return self._start_qt_camera(mode)
+
+    def _start_picamera2_camera(self, mode: str) -> bool:
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            self._set_camera_text("Camera disabled in test mode")
+            return False
+        try:
+            from picamera2 import Picamera2
+        except Exception as exc:
+            self.controller.logs.append(f"Picamera2 unavailable: {exc}")
+            return False
+        try:
+            picamera = Picamera2()
+            size, sensor_config = _picamera_capture_plan(picamera)
+            main_config: dict[str, object] = {"format": "RGB888"}
+            raw_config: dict[str, object] = {}
+            if size is not None:
+                main_config["size"] = size
+                raw_config["size"] = size
+            config = picamera.create_still_configuration(
+                main=main_config,
+                raw=raw_config,
+                sensor=sensor_config,
+                buffer_count=2,
+            )
+            picamera.configure(config)
+            picamera.start()
+        except Exception as exc:
+            self.controller.logs.append(f"Picamera2 start failed: {exc}")
+            try:
+                picamera.close()
+            except Exception:
+                pass
+            return False
+        self._picamera = picamera
+        self._picamera_error_logged = False
+        self._camera_backend = "picamera2"
+        self._camera_mode = mode
+        self._camera_frame_logged = False
+        if mode == "timelapse":
+            if self._preview_image().isNull():
+                self._set_camera_text("Waiting for first raw image")
+            else:
+                self._refresh_camera_previews()
+        else:
+            label = f"{size[0]}x{size[1]}" if size is not None else "Picamera2 default"
+            self._set_camera_text(f"Raw camera image: {label}")
+        self.controller.logs.append(_picamera_modes_text(picamera))
+        if size is None:
+            self.controller.logs.append("Picamera2 raw frame selected: driver default")
+        else:
+            self.controller.logs.append(f"Picamera2 raw frame requested: {size[0]}x{size[1]}")
+        self._picamera_timer.start(250)
+        self._capture_picamera_frame()
+        message = {
+            "live": "raw live image started",
+            "timelapse": "raw timelapse camera started",
+            "test_capture": "raw test capture camera started",
+        }.get(mode, "raw camera started")
+        self.controller.logs.append(message)
+        return True
+
+    def _start_qt_camera(self, mode: str) -> bool:
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             self._set_camera_text("Camera disabled in test mode")
             return False
@@ -1166,7 +1333,13 @@ class MainWindow(QMainWindow):
         self._camera_sink = QVideoSink()
         self._camera_sink.videoFrameChanged.connect(self._show_camera_frame)
         self._camera_session = QMediaCaptureSession()
-        self._camera = QCamera(devices[0])
+        camera_device = devices[0]
+        self._camera = QCamera(camera_device)
+        camera_format = _best_camera_format(camera_device.videoFormats())
+        if camera_format is not None:
+            self._camera.setCameraFormat(camera_format)
+        self._camera_frame_logged = False
+        self._camera_backend = "qt"
         self._camera.errorOccurred.connect(lambda *_: self._set_camera_text("Camera error"))
         self._camera_session.setCamera(self._camera)
         self._camera_session.setVideoSink(self._camera_sink)
@@ -1177,8 +1350,11 @@ class MainWindow(QMainWindow):
             else:
                 self._refresh_camera_previews()
         else:
-            self._set_camera_text(f"USB camera: {devices[0].description()}")
+            self._set_camera_text(f"USB camera: {camera_device.description()}")
         self._camera.start()
+        if camera_format is not None:
+            size = camera_format.resolution()
+            self.controller.logs.append(f"camera format selected: {size.width()}x{size.height()}")
         message = {
             "live": "live video started",
             "timelapse": "timelapse camera started",
@@ -1188,6 +1364,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _stop_camera(self, text: str, log_message: str | None = None) -> None:
+        self._stop_video_recording()
+        self._stop_picamera()
         if self._camera is not None:
             self._camera.stop()
         if log_message:
@@ -1195,6 +1373,7 @@ class MainWindow(QMainWindow):
         self._camera = None
         self._camera_session = None
         self._camera_sink = None
+        self._camera_backend = "idle"
         self._camera_mode = "idle"
         with self._camera_image_lock:
             self._camera_image = QImage()
@@ -1220,17 +1399,63 @@ class MainWindow(QMainWindow):
         image = frame.toImage()
         if image.isNull():
             return
+        if not self._camera_frame_logged:
+            self.controller.logs.append(f"camera frame received: {image.width()}x{image.height()}")
+            self._camera_frame_logged = True
         with self._camera_image_lock:
             self._camera_image = image.copy()
         if self._camera_mode == "timelapse":
             return
         self._paint_camera_image()
 
+    def _capture_picamera_frame(self) -> None:
+        if self._picamera is None:
+            return
+        try:
+            image = self._capture_picamera_image()
+        except Exception as exc:
+            if not self._picamera_error_logged:
+                self.controller.logs.append(f"Picamera2 frame failed: {exc}")
+                self._picamera_error_logged = True
+            return
+        if image.isNull():
+            return
+        if not self._camera_frame_logged:
+            self.controller.logs.append(f"raw frame received: {image.width()}x{image.height()}")
+            self._camera_frame_logged = True
+        with self._camera_image_lock:
+            self._camera_image = image.copy()
+        if self._camera_mode == "timelapse":
+            return
+        self._paint_camera_image()
+
+    def _capture_picamera_image(self) -> QImage:
+        picamera = self._picamera
+        if picamera is None:
+            return QImage()
+        with self._picamera_capture_lock:
+            array = picamera.capture_array("main")
+        return _qimage_from_rgb_array(array)
+
+    def _stop_picamera(self) -> None:
+        self._picamera_timer.stop()
+        picamera = self._picamera
+        self._picamera = None
+        if picamera is None:
+            return
+        try:
+            picamera.stop()
+        except Exception:
+            pass
+        try:
+            picamera.close()
+        except Exception:
+            pass
+
     def _paint_camera_image(self) -> None:
         image = self._preview_image()
         if image.isNull():
             return
-        pixmap = QPixmap.fromImage(image)
         previews = (
             self.home_camera_preview,
             self.camera_preview,
@@ -1241,11 +1466,77 @@ class MainWindow(QMainWindow):
                 continue
             if preview.size().isEmpty():
                 continue
-            scaled = pixmap.scaled(preview.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            x = max(0, (scaled.width() - preview.width()) // 2)
-            y = max(0, (scaled.height() - preview.height()) // 2)
+            scaled = self._camera_preview_pixmap(image, preview)
             preview.setText("")
-            preview.setPixmap(scaled.copy(x, y, preview.width(), preview.height()))
+            preview.setPixmap(scaled)
+
+    def _camera_preview_pixmap(self, image: QImage, preview: QLabel) -> QPixmap:
+        if preview is self.camera_preview and self._camera_zoom > self.CAMERA_ZOOM_MIN:
+            image = self._zoomed_camera_image(image)
+        return QPixmap.fromImage(image).scaled(preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _zoomed_camera_image(self, image: QImage) -> QImage:
+        self._clamp_camera_pan(image)
+        zoom = max(self.CAMERA_ZOOM_MIN, self._camera_zoom)
+        crop_width = max(1, int(round(image.width() / zoom)))
+        crop_height = max(1, int(round(image.height() / zoom)))
+        center_x = image.width() / 2 + self._camera_pan_x
+        center_y = image.height() / 2 + self._camera_pan_y
+        left = _clamp_int(int(round(center_x - crop_width / 2)), 0, image.width() - crop_width)
+        top = _clamp_int(int(round(center_y - crop_height / 2)), 0, image.height() - crop_height)
+        return image.copy(left, top, crop_width, crop_height)
+
+    def _clamp_camera_pan(self, image: QImage) -> None:
+        if image.isNull() or self._camera_zoom <= self.CAMERA_ZOOM_MIN:
+            self._camera_pan_x = 0.0
+            self._camera_pan_y = 0.0
+            return
+        crop_width = image.width() / self._camera_zoom
+        crop_height = image.height() / self._camera_zoom
+        max_x = max(0.0, (image.width() - crop_width) / 2)
+        max_y = max(0.0, (image.height() - crop_height) / 2)
+        self._camera_pan_x = _clamp_float(self._camera_pan_x, -max_x, max_x)
+        self._camera_pan_y = _clamp_float(self._camera_pan_y, -max_y, max_y)
+
+    def _zoom_camera_in(self) -> None:
+        self._set_camera_zoom(self._camera_zoom + self.CAMERA_ZOOM_STEP)
+
+    def _zoom_camera_out(self) -> None:
+        self._set_camera_zoom(self._camera_zoom - self.CAMERA_ZOOM_STEP)
+
+    def _set_camera_zoom(self, zoom: float) -> None:
+        self._camera_zoom = _clamp_float(zoom, self.CAMERA_ZOOM_MIN, self.CAMERA_ZOOM_MAX)
+        if self._camera_zoom <= self.CAMERA_ZOOM_MIN:
+            self._camera_pan_x = 0.0
+            self._camera_pan_y = 0.0
+        else:
+            self._clamp_camera_pan(self._preview_image())
+        self._render_camera_zoom()
+        self._paint_camera_image()
+
+    def _pan_camera_preview(self, delta_x: int, delta_y: int) -> None:
+        if self._camera_zoom <= self.CAMERA_ZOOM_MIN:
+            return
+        image = self._preview_image()
+        if image.isNull():
+            return
+        pixmap = self.camera_preview.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        crop_width = image.width() / self._camera_zoom
+        crop_height = image.height() / self._camera_zoom
+        self._camera_pan_x -= delta_x * (crop_width / max(1, pixmap.width()))
+        self._camera_pan_y -= delta_y * (crop_height / max(1, pixmap.height()))
+        self._clamp_camera_pan(image)
+        self._paint_camera_image()
+
+    def _render_camera_zoom(self) -> None:
+        if not hasattr(self, "camera_zoom_label"):
+            return
+        percent = int(round(self._camera_zoom * 100))
+        self.camera_zoom_label.setText(f"{percent}%")
+        self.camera_zoom_out_button.setEnabled(self._camera_zoom > self.CAMERA_ZOOM_MIN)
+        self.camera_zoom_in_button.setEnabled(self._camera_zoom < self.CAMERA_ZOOM_MAX)
 
     def _preview_image(self) -> QImage:
         with self._camera_image_lock:
@@ -1254,8 +1545,16 @@ class MainWindow(QMainWindow):
             return self._last_picture_image.copy()
 
     def _save_camera_image(self, destination: Path) -> Path:
-        with self._camera_image_lock:
-            image = self._camera_image.copy()
+        if self._picamera is not None:
+            try:
+                image = self._capture_picamera_image()
+            except Exception as exc:
+                raise RuntimeError(f"camera image capture failed: {exc}") from exc
+            with self._camera_image_lock:
+                self._camera_image = image.copy()
+        else:
+            with self._camera_image_lock:
+                image = self._camera_image.copy()
         if image.isNull():
             raise RuntimeError("no camera frame available")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1266,6 +1565,74 @@ class MainWindow(QMainWindow):
             self._last_picture_path = str(destination)
         self.preview_refresh_requested.emit()
         return destination
+
+    def _camera_active(self) -> bool:
+        return self._camera is not None or self._picamera is not None
+
+    def _video_recording_enabled(self) -> bool:
+        return bool(getattr(self, "test_record_video_check", None) and self.test_record_video_check.isChecked())
+
+    def _video_storage_mode(self) -> str:
+        combo = getattr(self, "test_video_storage_combo", None)
+        if combo is None:
+            return "internal"
+        return str(combo.currentData())
+
+    def _prepare_video_recording_path(self) -> Path:
+        base = resolve_storage_path("video", self._video_storage_mode())
+        ensure_writable(base)
+        return unique_path(base, f"video_{stamp()}", ".mp4")
+
+    def _create_video_recorder(self, destination: Path) -> QMediaRecorder:
+        if self._camera_session is None:
+            raise RuntimeError("camera session unavailable")
+        recorder = QMediaRecorder(self)
+        media_format = QMediaFormat()
+        media_format.setFileFormat(QMediaFormat.FileFormat.MPEG4)
+        recorder.setMediaFormat(media_format)
+        recorder.setOutputLocation(QUrl.fromLocalFile(str(destination)))
+        recorder.errorOccurred.connect(lambda *_: self._video_recording_error(recorder.errorString()))
+        self._camera_session.setRecorder(recorder)
+        return recorder
+
+    def _start_video_recording(self, destination: Path) -> bool:
+        try:
+            recorder = self._create_video_recorder(destination)
+            recorder.record()
+        except Exception as exc:
+            self._set_timelapse_notice(f"Video recording not started: {exc}")
+            return False
+        self._video_recorder = recorder
+        self._video_recording_path = str(destination)
+        self._last_video_path = str(destination)
+        self.controller.logs.append(f"video recording started: {destination}")
+        return True
+
+    def _stop_video_recording(self) -> None:
+        recorder = self._video_recorder
+        if recorder is None:
+            return
+        path = self._video_recording_path
+        try:
+            recorder.stop()
+        except Exception as exc:
+            self.controller.logs.append(f"video recording stop failed: {exc}")
+        if self._camera_session is not None:
+            try:
+                self._camera_session.setRecorder(None)
+            except TypeError:
+                pass
+        self._video_recorder = None
+        self._video_recording_path = ""
+        if path:
+            self._last_video_path = path
+            self.controller.logs.append(f"video recording stopped: {path}")
+
+    def _video_recording_error(self, message: str) -> None:
+        message = message or "recorder error"
+        self._set_timelapse_notice(f"Video recording error: {message}")
+        self._stop_video_recording()
+        self._render()
 
     def _load_latest_picture_preview(self) -> None:
         files: list[Path] = []
@@ -1384,6 +1751,12 @@ class MainWindow(QMainWindow):
         self.controller.poll_serial()
         self._render()
 
+    def _toggle_logs(self) -> None:
+        self._logs_visible = not self._logs_visible
+        self.log_view.setVisible(self._logs_visible)
+        self.logs_button.setText("HIDE LOGS" if self._logs_visible else "LOGS")
+        self._render()
+
     def _nudge_target(self, delta: float) -> None:
         target = max(0.0, min(80.0, self.controller.state.target_c + delta))
         self.controller.set_target_from_ui(target)
@@ -1414,6 +1787,8 @@ class MainWindow(QMainWindow):
             blocked = self.infinite_check.blockSignals(True)
             self.infinite_check.setChecked(preferences.timelapse_infinite)
             self.infinite_check.blockSignals(blocked)
+            self._set_record_video_checked(preferences.live_record_video)
+            self._set_video_storage_mode(preferences.video_storage_mode)
         finally:
             self._loading_preferences = False
         self._render()
@@ -1432,6 +1807,8 @@ class MainWindow(QMainWindow):
             timelapse_light_duration_s=round(float(self.light_duration_spin.value()), 1),
             timelapse_total_duration_min=int(self.total_duration_spin.value()),
             timelapse_infinite=self.infinite_check.isChecked(),
+            live_record_video=self._video_recording_enabled(),
+            video_storage_mode=self._video_storage_mode(),
         )
 
     def _save_preferences(self) -> None:
@@ -1454,6 +1831,41 @@ class MainWindow(QMainWindow):
         blocked = widget.blockSignals(True)
         widget.setValue(value)
         widget.blockSignals(blocked)
+
+    def _set_record_video_checked(self, checked: bool) -> None:
+        for checkbox in (
+            getattr(self, "test_record_video_check", None),
+            getattr(self, "camera_record_video_check", None),
+        ):
+            if checkbox is None:
+                continue
+            blocked = checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(blocked)
+
+    def _set_record_video_enabled(self, checked: bool) -> None:
+        self._set_record_video_checked(checked)
+        self._save_preferences()
+        self._render()
+
+    def _set_video_storage_mode(self, mode: str) -> None:
+        for combo in (
+            getattr(self, "test_video_storage_combo", None),
+            getattr(self, "camera_video_storage_combo", None),
+        ):
+            if combo is None:
+                continue
+            self._set_combo_data(combo, mode)
+
+    def _set_video_storage_from_test(self) -> None:
+        self._set_video_storage_mode(str(self.test_video_storage_combo.currentData()))
+        self._save_preferences()
+        self._render()
+
+    def _set_video_storage_from_camera(self) -> None:
+        self._set_video_storage_mode(str(self.camera_video_storage_combo.currentData()))
+        self._save_preferences()
+        self._render()
 
     def _timelapse_form_changed(self) -> None:
         self._save_preferences()
@@ -1521,7 +1933,7 @@ class MainWindow(QMainWindow):
         if snap.live_running or self._camera_mode == "live":
             self._set_timelapse_notice("Stop live video before starting timelapse")
             return False
-        if self._camera is not None:
+        if self._camera_active():
             return self._camera_mode == "timelapse"
         if self._start_usb_camera("timelapse"):
             return True
@@ -1555,7 +1967,7 @@ class MainWindow(QMainWindow):
             self._set_timelapse_notice("Stop live video before test capture")
             self._render()
             return
-        if self._camera is not None or self._camera_mode != "idle":
+        if self._camera_active() or self._camera_mode != "idle":
             self._set_timelapse_notice("Camera already active")
             self._render()
             return
@@ -1585,17 +1997,30 @@ class MainWindow(QMainWindow):
                 self._set_timelapse_notice("Stop timelapse before starting live video")
             self._render()
             return
-        if self._camera is not None and self._camera_mode == "live":
+        if self._camera_active() and self._camera_mode == "live":
             if self.timelapse_service.set_live_running(True):
                 self._timelapse_notice = ""
                 self._live_neopixel_on()
             self._render()
             return
-        if self._camera is not None:
+        if self._camera_active():
             self._set_timelapse_notice("Camera already active")
             self._render()
             return
-        if self._start_usb_camera("live"):
+        video_destination: Path | None = None
+        if self._video_recording_enabled():
+            try:
+                video_destination = self._prepare_video_recording_path()
+            except Exception as exc:
+                self._set_timelapse_notice(str(exc))
+                self._render()
+                return
+        if self._start_usb_camera("live", require_qt_recorder=video_destination is not None):
+            if video_destination is not None and not self._start_video_recording(video_destination):
+                self._stop_camera("Live video stopped")
+                self.timelapse_service.set_live_running(False)
+                self._render()
+                return
             if self.timelapse_service.set_live_running(True):
                 self._timelapse_notice = ""
                 self._live_neopixel_on()
@@ -1613,7 +2038,7 @@ class MainWindow(QMainWindow):
             self._stop_camera("Timelapse camera stopped", "timelapse camera stopped")
         elif self._camera_mode == "live":
             self._stop_camera("Live video stopped", "live video stopped")
-        elif self._camera is not None:
+        elif self._camera_active():
             self._stop_camera("Live video stopped")
         self.timelapse_service.set_live_running(False)
         self._live_neopixel_off()
@@ -1842,6 +2267,12 @@ class MainWindow(QMainWindow):
             self.test_brightness_plus_button,
         ):
             widget.setEnabled(not snap.running)
+        for widget in (
+            self.test_record_video_check,
+            self.test_video_storage_combo,
+        ):
+            widget.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
+        self._render_video_status()
         self.test_neopixel_status.setText(
             "NeoPixel ON" if self.controller.state.neopixel.enabled else "NeoPixel OFF"
         )
@@ -1851,8 +2282,29 @@ class MainWindow(QMainWindow):
         live_active = snap.live_running and self._camera_mode == "live"
         self.camera_start_live_button.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
         self.camera_stop_live_button.setEnabled(live_active)
+        self.camera_record_video_check.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
+        self.camera_video_storage_combo.setEnabled(not live_active and not snap.running and self._camera_mode == "idle")
+        self._render_video_status()
         self._render_preview_badges()
+        self._render_camera_zoom()
         self._paint_camera_image()
+
+    def _render_video_status(self) -> None:
+        if self._video_recorder is not None and self._video_recording_path:
+            text = f"Video: recording to {self._video_recording_path}"
+        elif self._last_video_path:
+            text = f"Last video: {self._last_video_path}"
+        elif self._video_recording_enabled():
+            text = f"Video: {_storage_label(self._video_storage_mode())}"
+        else:
+            text = "Video: display only"
+        for label in (
+            getattr(self, "test_video_status", None),
+            getattr(self, "camera_video_status", None),
+        ):
+            if label is not None:
+                label.setText(text)
+                label.setToolTip(self._video_recording_path or self._last_video_path)
 
     def _render_preview_badges(self) -> None:
         text = self._preview_badge_text()
@@ -1868,6 +2320,8 @@ class MainWindow(QMainWindow):
             label.setToolTip(tooltip)
 
     def _preview_badge_text(self) -> str:
+        if self._video_recorder is not None:
+            return "Recording"
         if self._camera_mode in {"live", "test_capture"}:
             return "Live"
         with self._camera_image_lock:
@@ -1979,3 +2433,130 @@ def _bytes(value: int) -> str:
         amount /= 1024
         index += 1
     return f"{amount:.1f} {units[index]}"
+
+
+def _storage_label(mode: str) -> str:
+    return "External disk" if mode == "external" else "Internal Raspberry Pi"
+
+
+def _picamera_capture_plan(picamera: object) -> tuple[tuple[int, int] | None, dict[str, object]]:
+    size = _picamera_sensor_resolution(picamera)
+    if size is None:
+        size = _picamera_pixel_array_size(picamera)
+    if size is None:
+        size = _largest_picamera_mode_size(picamera)
+    if size is None:
+        return None, {}
+    return size, {"output_size": size}
+
+
+def _picamera_sensor_resolution(picamera: object) -> tuple[int, int] | None:
+    return _valid_size(getattr(picamera, "sensor_resolution", None))
+
+
+def _picamera_pixel_array_size(picamera: object) -> tuple[int, int] | None:
+    properties = getattr(picamera, "camera_properties", {}) or {}
+    if not isinstance(properties, dict):
+        return None
+    return _valid_size(properties.get("PixelArraySize"))
+
+
+def _largest_picamera_mode_size(picamera: object) -> tuple[int, int] | None:
+    sizes: list[tuple[int, int]] = []
+    for mode in getattr(picamera, "sensor_modes", []) or []:
+        if not isinstance(mode, dict):
+            continue
+        size = _valid_size(mode.get("size"))
+        if size is not None:
+            sizes.append(size)
+    if not sizes:
+        return None
+    return max(sizes, key=lambda size: size[0] * size[1])
+
+
+def _picamera_modes_text(picamera: object) -> str:
+    sensor_resolution = _format_size(_picamera_sensor_resolution(picamera))
+    pixel_array = _format_size(_picamera_pixel_array_size(picamera))
+    mode_labels: list[str] = []
+    for mode in getattr(picamera, "sensor_modes", []) or []:
+        if not isinstance(mode, dict):
+            continue
+        label = _format_size(_valid_size(mode.get("size")))
+        parts = [label]
+        fmt = mode.get("format")
+        if fmt:
+            parts.append(str(fmt))
+        fps = mode.get("fps")
+        if fps:
+            parts.append(f"{fps}fps")
+        crop_limits = mode.get("crop_limits")
+        if crop_limits:
+            parts.append(f"crop={crop_limits}")
+        mode_labels.append(" ".join(parts))
+    modes = "; ".join(mode_labels) if mode_labels else "none"
+    return (
+        "Picamera2 properties: "
+        f"sensor_resolution={sensor_resolution}, "
+        f"PixelArraySize={pixel_array}, "
+        f"sensor_modes={modes}"
+    )
+
+
+def _valid_size(value: object) -> tuple[int, int] | None:
+    try:
+        if not value or len(value) != 2:  # type: ignore[arg-type]
+            return None
+        width, height = int(value[0]), int(value[1])  # type: ignore[index]
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _format_size(size: tuple[int, int] | None) -> str:
+    if size is None:
+        return "unknown"
+    return f"{size[0]}x{size[1]}"
+
+
+def _clamp_float(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
+
+
+def _qimage_from_rgb_array(array: object) -> QImage:
+    shape = getattr(array, "shape", ())
+    if len(shape) != 3:
+        return QImage()
+    height, width, channels = int(shape[0]), int(shape[1]), int(shape[2])
+    if width <= 0 or height <= 0 or channels < 3:
+        return QImage()
+    rgb = array[:, :, :3].copy()
+    stride = int(rgb.strides[0])
+    return QImage(rgb.data, width, height, stride, QImage.Format.Format_RGB888).copy()
+
+
+def _best_camera_format(formats: list[QCameraFormat]) -> QCameraFormat | None:
+    valid = [camera_format for camera_format in formats if not camera_format.isNull()]
+    if not valid:
+        return None
+    four_three = [camera_format for camera_format in valid if _is_four_three(camera_format)]
+    candidates = four_three or valid
+    return max(candidates, key=_camera_format_score)
+
+
+def _is_four_three(camera_format: QCameraFormat) -> bool:
+    size = camera_format.resolution()
+    height = size.height()
+    if height <= 0:
+        return False
+    return abs((size.width() / height) - (4 / 3)) < 0.02
+
+
+def _camera_format_score(camera_format: QCameraFormat) -> tuple[int, float]:
+    size = camera_format.resolution()
+    return (size.width() * size.height(), camera_format.maxFrameRate())

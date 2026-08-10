@@ -32,10 +32,11 @@ Pump and Timelapse controls are usable from the UI:
   and turn it off in `finally` after every capture attempt.
 - The Timelapse page provides storage selection, disk free space, interval, NeoPixel power,
   light duration, finite or infinite duration, Start/Stop, Test Capture, Live Video Start/Stop,
-  frame count, last saved file, and `metadata.json`.
+  optional live video recording, frame count, last saved file, and `metadata.json`.
 
-The Camera page shows the first detected USB camera through Qt Multimedia when Live Video is started.
-It keeps the touchable BACK button and does not add OpenCV.
+The Camera page first tries Picamera2/libcamera full-frame RGB capture for raw 4:3 display.
+Qt Multimedia remains the fallback camera path and is used for `video_YYYYMMDD_HHMMSS.mp4`
+recording to the selected internal or external storage. It keeps the touchable BACK button and does not add OpenCV.
 
 ## Timelapse Manual Test
 
@@ -44,10 +45,12 @@ It keeps the touchable BACK button and does not add OpenCV.
 3. Press `START LIVE VIDEO`, wait for a stable image, then press `TEST CAPTURE`.
 4. Confirm the NeoPixel turns on only during the configured light duration and turns off after capture.
 5. Confirm `Last file` points to `test_capture_YYYYMMDD_HHMMSS.jpg` and the image opens from that path.
-6. Set interval to `10 seconds`, light duration to `1.0 s`, duration to `1 min`, then press `START TIMELAPSE`.
-7. Confirm the frame counter increments without UI freeze and the NeoPixel turns off after every frame.
-8. Press `STOP` and verify the session folder contains `img_*.jpg` and `metadata.json`.
-9. Repeat with `External disk` inserted, then remove or unmount it before start to confirm a clear storage error.
+6. Enable `Record video`, choose storage, press `START LIVE`, then `STOP LIVE`, and confirm the
+   saved `video_*.mp4` exists in `~/Microplaite/video` or the external disk.
+7. Set interval to `10 seconds`, light duration to `1.0 s`, duration to `1 min`, then press `START TIMELAPSE`.
+8. Confirm the frame counter increments without UI freeze and the NeoPixel turns off after every frame.
+9. Press `STOP` and verify the session folder contains `img_*.jpg` and `metadata.json`.
+10. Repeat with `External disk` inserted, then remove or unmount it before start to confirm a clear storage error.
 
 ## Run
 

@@ -1,8 +1,10 @@
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QLabel, QFrame, QPushButton
 
@@ -12,6 +14,7 @@ from microplaite_ui.core.state import AppState, TEMP_HISTORY_MAXLEN, derive_syst
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
 from microplaite_ui.services import timelapse as timelapse_module
+from microplaite_ui.ui import main_window as main_window_module
 from microplaite_ui.ui.main_window import MainWindow
 
 
@@ -332,6 +335,7 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.width() == SCREEN_WIDTH
     assert window.height() == SCREEN_HEIGHT
     assert window.log_view.height() <= 80
+    assert window.log_view.isVisible() is False
     assert window.stop_button.height() >= 50
     assert window.start_button.isVisible()
     assert window.start_button.width() == 200
@@ -349,23 +353,45 @@ def test_layout_constants_fit_1280x720() -> None:
     assert not hasattr(window, "home_system_status")
     temperature_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "temperatureCard"]
     camera_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "cameraCard"]
-    assert camera_cards[0].width() >= 700
-    assert camera_cards[0].height() >= 280
+    pump_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "pumpCard"]
+    timelapse_cards = [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "timelapseCard"]
+    assert camera_cards[0].width() >= 500
+    assert camera_cards[0].height() >= 420
+    assert abs(pump_cards[0].y() - camera_cards[0].y()) <= 2
+    assert abs(pump_cards[0].y() - temperature_cards[0].y()) <= 2
+    assert pump_cards[0].x() > camera_cards[0].geometry().right()
+    assert timelapse_cards[0].x() == pump_cards[0].x()
+    assert timelapse_cards[0].y() > pump_cards[0].geometry().bottom()
+    assert window.home_camera_preview.size().width() == 464
+    assert window.home_camera_preview.size().height() == 348
     window._camera_image = QImage(320, 240, QImage.Format.Format_RGB32)
     window._camera_image.fill(0x216EE5)
     window._paint_camera_image()
-    assert window.home_camera_preview.pixmap().size() == window.home_camera_preview.size()
+    preview_pixmap = window.home_camera_preview.pixmap()
+    assert preview_pixmap.width() <= window.home_camera_preview.width()
+    assert preview_pixmap.height() <= window.home_camera_preview.height()
+    preview_ratio = preview_pixmap.width() / preview_pixmap.height()
+    assert abs(preview_ratio - (4 / 3)) <= 0.02
     assert not [card for card in window.home_page.findChildren(QFrame) if card.objectName() == "thermalCard"]
     assert window.stop_button.isVisible()
     assert window.clear_button.isVisible()
-    assert window.refresh_button.isVisible()
+    assert window.logs_button.isVisible()
+    assert not hasattr(window, "refresh_button")
     assert window.stop_button.y() > max(
         temperature_cards[0].geometry().bottom(),
         camera_cards[0].geometry().bottom(),
     )
     assert window.clear_button.y() == window.stop_button.y()
-    assert window.refresh_button.y() == window.stop_button.y()
+    assert window.logs_button.y() == window.stop_button.y()
     assert window.log_view.geometry().bottom() <= window.home_page.height()
+    window.logs_button.click()
+    app.processEvents()
+    assert window.log_view.isVisible() is True
+    assert window.logs_button.text() == "HIDE LOGS"
+    assert window.log_view.geometry().bottom() <= window.home_page.height()
+    window.logs_button.click()
+    app.processEvents()
+    assert window.log_view.isVisible() is False
 
     window.setFixedSize(SCREEN_WIDTH, 640)
     app.processEvents()
@@ -373,7 +399,177 @@ def test_layout_constants_fit_1280x720() -> None:
         temperature_cards[0].geometry().bottom(),
         camera_cards[0].geometry().bottom(),
     )
-    assert window.log_view.geometry().bottom() <= window.home_page.height()
+    assert window.log_view.isVisible() is False
+
+
+def test_camera_format_selection_prefers_largest_four_three_mode() -> None:
+    class FakeFormat:
+        def __init__(self, width: int, height: int, fps: float = 30.0) -> None:
+            self._size = QSize(width, height)
+            self._fps = fps
+
+        def isNull(self) -> bool:
+            return False
+
+        def resolution(self) -> QSize:
+            return self._size
+
+        def maxFrameRate(self) -> float:
+            return self._fps
+
+    selected = main_window_module._best_camera_format(
+        [
+            FakeFormat(1920, 1080),
+            FakeFormat(1280, 720),
+            FakeFormat(1600, 1200, 15.0),
+            FakeFormat(640, 480),
+        ]
+    )
+
+    assert selected.resolution() == QSize(1600, 1200)
+
+
+def test_picamera_capture_plan_prefers_reported_sensor_resolution() -> None:
+    class FakePicamera:
+        sensor_resolution = (4056, 3040)
+        camera_properties = {"PixelArraySize": (3280, 2464)}
+        sensor_modes = [
+            {"size": (1920, 1080)},
+            {"size": (1600, 1200)},
+        ]
+
+    assert main_window_module._picamera_capture_plan(FakePicamera()) == (
+        (4056, 3040),
+        {"output_size": (4056, 3040)},
+    )
+
+
+def test_picamera_capture_plan_uses_pixel_array_before_sensor_modes() -> None:
+    class FakePicamera:
+        camera_properties = {"PixelArraySize": (3280, 2464)}
+        sensor_modes = [
+            {"size": (4056, 2280)},
+            {"size": (1600, 1200)},
+        ]
+
+    assert main_window_module._picamera_capture_plan(FakePicamera()) == (
+        (3280, 2464),
+        {"output_size": (3280, 2464)},
+    )
+
+
+def test_picamera_capture_plan_falls_back_to_largest_reported_mode() -> None:
+    class FakePicamera:
+        sensor_modes = [
+            {"size": (1920, 1080)},
+            {"size": (4056, 3040)},
+            {"size": (1600, 1200)},
+        ]
+
+    assert main_window_module._picamera_capture_plan(FakePicamera()) == (
+        (4056, 3040),
+        {"output_size": (4056, 3040)},
+    )
+
+
+def test_picamera_capture_plan_leaves_driver_default_when_size_unknown() -> None:
+    class FakePicamera:
+        sensor_modes = []
+
+    assert main_window_module._picamera_capture_plan(FakePicamera()) == (None, {})
+
+
+def test_rgb_array_conversion_keeps_full_image_size() -> None:
+    import numpy as np
+
+    array = np.zeros((567, 1234, 3), dtype=np.uint8)
+    array[0, 0] = [255, 0, 0]
+
+    image = main_window_module._qimage_from_rgb_array(array)
+
+    assert image.width() == 1234
+    assert image.height() == 567
+    assert image.pixelColor(0, 0).red() == 255
+
+
+def test_picamera_save_captures_fresh_frame(tmp_path) -> None:
+    import numpy as np
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    stale = QImage(10, 10, QImage.Format.Format_RGB32)
+    stale.fill(0xAA0000)
+    with window._camera_image_lock:
+        window._camera_image = stale
+
+    class FakePicamera:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def capture_array(self, stream: str):
+            assert stream == "main"
+            self.calls += 1
+            array = np.zeros((7, 11, 3), dtype=np.uint8)
+            array[:, :] = [0, 255, 0]
+            return array
+
+    picamera = FakePicamera()
+    window._picamera = picamera
+
+    saved = window._save_camera_image(tmp_path / "fresh.jpg")
+
+    assert saved == tmp_path / "fresh.jpg"
+    assert picamera.calls == 1
+    assert window._last_picture_image.width() == 11
+    assert window._last_picture_image.height() == 7
+    assert QImage(str(saved)).size() == window._last_picture_image.size()
+
+
+def test_camera_preview_zoom_crops_last_picture_and_resets_pan() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    image = QImage(400, 300, QImage.Format.Format_RGB32)
+    image.fill(0x216EE5)
+    with window._camera_image_lock:
+        window._last_picture_image = image
+
+    window._set_camera_zoom(2.0)
+    zoomed = window._zoomed_camera_image(image)
+
+    assert window.camera_zoom_label.text() == "200%"
+    assert zoomed.width() == 200
+    assert zoomed.height() == 150
+
+    window._pan_camera_preview(100, 0)
+
+    assert window._camera_pan_x < 0
+
+    window._set_camera_zoom(1.0)
+
+    assert window.camera_zoom_label.text() == "100%"
+    assert window._camera_pan_x == 0.0
+    assert window._camera_pan_y == 0.0
+
+
+def test_camera_preview_zoom_uses_live_frame() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    live_image = QImage(320, 240, QImage.Format.Format_RGB32)
+    live_image.fill(0x149653)
+    last_picture = QImage(640, 480, QImage.Format.Format_RGB32)
+    last_picture.fill(0x216EE5)
+    with window._camera_image_lock:
+        window._camera_image = live_image
+        window._last_picture_image = last_picture
+    window._camera_mode = "live"
+
+    window._set_camera_zoom(2.0)
+
+    assert window._preview_image().size() == live_image.size()
+    assert window.camera_preview.pixmap() is not None
 
 
 def test_main_window_starts_status_then_log_on_when_connected() -> None:
@@ -485,6 +681,8 @@ def test_main_window_restores_user_preferences_between_sessions() -> None:
     first.light_duration_spin.setValue(2.3)
     first.total_duration_spin.setValue(90)
     first.infinite_check.setChecked(True)
+    first.test_record_video_check.setChecked(True)
+    first.camera_video_storage_combo.setCurrentIndex(1)
     first._save_preferences()
 
     second = MainWindow(AppController(FakeEsp32Client()))
@@ -502,6 +700,10 @@ def test_main_window_restores_user_preferences_between_sessions() -> None:
     assert second.light_duration_spin.value() == 2.3
     assert second.total_duration_spin.value() == 90
     assert second.infinite_check.isChecked() is True
+    assert second.test_record_video_check.isChecked() is True
+    assert second.camera_record_video_check.isChecked() is True
+    assert second.test_video_storage_combo.currentData() == "external"
+    assert second.camera_video_storage_combo.currentData() == "external"
 
 
 def test_navigation_methods_select_expected_pages() -> None:
@@ -589,6 +791,7 @@ def test_timelapse_page_replaces_neopixel_card_and_shows_controls() -> None:
     assert window.timelapse_stack.currentIndex() == 1
     assert window.timelapse_test_tab.objectName() == "tabButtonActive"
     assert window.timelapse_acquisition_tab.objectName() == "tabButton"
+    assert round(window.timelapse_live_preview.width() / window.timelapse_live_preview.height(), 2) == round(4 / 3, 2)
 
 
 def test_timelapse_fields_use_large_step_buttons() -> None:
@@ -682,7 +885,7 @@ def test_live_video_start_turns_neopixel_on_and_stop_turns_it_off(monkeypatch) -
     window.test_brightness_spin.setValue(66)
     client.commands.clear()
 
-    def fake_start_usb_camera(mode: str) -> bool:
+    def fake_start_usb_camera(mode: str, require_qt_recorder: bool = False) -> bool:
         window._camera_mode = mode
         image = QImage(32, 24, QImage.Format.Format_RGB32)
         image.fill(0x216EE5)
@@ -700,6 +903,7 @@ def test_live_video_start_turns_neopixel_on_and_stop_turns_it_off(monkeypatch) -
     assert window.timelapse_camera_badge.text() == "Live"
     assert window.camera_preview_badge.text() == "Live"
     assert client.commands == ["NEOPIXEL_BRIGHTNESS 66", "NEOPIXEL_ON"]
+    assert window._video_recorder is None
 
     client.commands.clear()
     window._stop_live_video()
@@ -707,6 +911,104 @@ def test_live_video_start_turns_neopixel_on_and_stop_turns_it_off(monkeypatch) -
     assert window.timelapse_service.snapshot().live_running is False
     assert window.controller.state.neopixel.enabled is False
     assert client.commands == ["NEOPIXEL_OFF"]
+
+
+def test_live_video_recording_uses_selected_internal_storage(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    client = RecordingClient()
+    window = MainWindow(AppController(client))
+    window.timer.stop()
+    client.commands.clear()
+
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.recorded = False
+            self.stopped = False
+
+        def record(self) -> None:
+            self.recorded = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    recorder = FakeRecorder()
+    destinations = []
+
+    def fake_start_usb_camera(mode: str, require_qt_recorder: bool = False) -> bool:
+        window._camera_mode = mode
+        image = QImage(32, 24, QImage.Format.Format_RGB32)
+        image.fill(0x216EE5)
+        with window._camera_image_lock:
+            window._camera_image = image
+        return True
+
+    def fake_create_video_recorder(destination):
+        destinations.append(destination)
+        return recorder
+
+    monkeypatch.setattr(main_window_module, "resolve_storage_path", lambda kind, mode: tmp_path / kind)
+    monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
+    monkeypatch.setattr(window, "_create_video_recorder", fake_create_video_recorder)
+    window.test_record_video_check.setChecked(True)
+
+    window._start_live_video()
+
+    assert recorder.recorded is True
+    assert destinations
+    assert destinations[0].parent == tmp_path / "video"
+    assert destinations[0].name.startswith("video_")
+    assert destinations[0].suffix == ".mp4"
+    assert window._video_recorder is recorder
+    assert window.home_camera_badge.text() == "Recording"
+    assert "video recording started" in "\n".join(window.controller.logs)
+
+    window._stop_live_video()
+
+    assert recorder.stopped is True
+    assert window._video_recorder is None
+    assert window._last_video_path == str(destinations[0])
+    assert "video recording stopped" in "\n".join(window.controller.logs)
+
+
+def test_live_video_recording_refuses_absent_external_storage(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    called = {"camera": False}
+
+    def fake_start_usb_camera(mode: str, require_qt_recorder: bool = False) -> bool:
+        called["camera"] = True
+        return True
+
+    monkeypatch.setattr(main_window_module, "resolve_storage_path", lambda kind, mode: Path("/media"))
+    monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
+    window.test_record_video_check.setChecked(True)
+    window.test_video_storage_combo.setCurrentIndex(1)
+
+    window._start_live_video()
+
+    assert called["camera"] is False
+    assert window._camera_mode == "idle"
+    assert window.timelapse_service.snapshot().live_running is False
+    assert "External disk absent or not writable" in window.timelapse_error.text()
+
+
+def test_live_video_record_controls_are_synchronized() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    window.test_record_video_check.setChecked(True)
+    assert window.camera_record_video_check.isChecked() is True
+
+    window.camera_record_video_check.setChecked(False)
+    assert window.test_record_video_check.isChecked() is False
+
+    window.camera_video_storage_combo.setCurrentIndex(1)
+    assert window.test_video_storage_combo.currentData() == "external"
+
+    window.test_video_storage_combo.setCurrentIndex(0)
+    assert window.camera_video_storage_combo.currentData() == "internal"
 
 
 def test_test_capture_refuses_when_live_video_is_active() -> None:
@@ -735,7 +1037,7 @@ def test_test_capture_runs_without_live_and_toggles_neopixel(tmp_path, monkeypat
     app.processEvents()
     client.commands.clear()
 
-    def fake_start_usb_camera(mode: str) -> bool:
+    def fake_start_usb_camera(mode: str, require_qt_recorder: bool = False) -> bool:
         window._camera_mode = mode
         image = QImage(32, 24, QImage.Format.Format_RGB32)
         image.fill(0x216EE5)
@@ -899,6 +1201,6 @@ def test_camera_page_contains_live_controls_and_full_preview() -> None:
     assert window.camera_start_live_button.text() == "START LIVE"
     assert window.camera_stop_live_button.text() == "STOP LIVE"
     assert window.camera_preview.objectName() == "cameraFullPreview"
-    assert window.camera_preview.y() <= 90
-    assert window.camera_preview.height() >= 590
+    assert window.camera_preview.height() >= 580
+    assert round(window.camera_preview.width() / window.camera_preview.height(), 2) == round(4 / 3, 2)
     assert not hasattr(window, "camera_status")
