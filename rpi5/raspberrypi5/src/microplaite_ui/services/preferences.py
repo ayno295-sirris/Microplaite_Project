@@ -27,6 +27,8 @@ class UserPreferences:
     timelapse_light_duration_s: float = 1.0
     timelapse_total_duration_min: int = 60
     timelapse_infinite: bool = False
+    live_record_video: bool = False
+    video_storage_mode: str = "internal"
 
 
 class PreferencesStore:
@@ -72,6 +74,8 @@ def _validated(raw: dict[str, Any]) -> UserPreferences:
     prefs.timelapse_light_duration_s = _clamp_float(prefs.timelapse_light_duration_s, 0.0, 60.0, 1.0, 1)
     prefs.timelapse_total_duration_min = _clamp_int(prefs.timelapse_total_duration_min, 1, 10080, 60)
     prefs.timelapse_infinite = bool(prefs.timelapse_infinite)
+    prefs.live_record_video = bool(prefs.live_record_video)
+    prefs.video_storage_mode = prefs.video_storage_mode if prefs.video_storage_mode in {"internal", "external"} else "internal"
     return prefs
 
 

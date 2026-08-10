@@ -20,6 +20,8 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
             timelapse_light_duration_s=2.5,
             timelapse_total_duration_min=90,
             timelapse_infinite=True,
+            live_record_video=True,
+            video_storage_mode="external",
         )
     )
 
@@ -33,6 +35,8 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
     assert loaded.timelapse_storage_mode == "external"
     assert loaded.timelapse_interval_unit == "minutes"
     assert loaded.timelapse_infinite is True
+    assert loaded.live_record_video is True
+    assert loaded.video_storage_mode == "external"
 
 
 def test_preferences_store_validates_bad_values(tmp_path) -> None:
@@ -48,6 +52,8 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
                 "timelapse_interval_unit": "hours",
                 "timelapse_light_duration_s": 99,
                 "timelapse_total_duration_min": -1,
+                "live_record_video": 1,
+                "video_storage_mode": "bad",
             }
         ),
         encoding="utf-8",
@@ -63,3 +69,5 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
     assert prefs.timelapse_interval_unit == "seconds"
     assert prefs.timelapse_light_duration_s == 60.0
     assert prefs.timelapse_total_duration_min == 1
+    assert prefs.live_record_video is True
+    assert prefs.video_storage_mode == "internal"

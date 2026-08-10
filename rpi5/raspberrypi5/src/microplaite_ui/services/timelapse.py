@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -12,9 +10,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from microplaite_ui.services.storage import (
+    INTERNAL_TIMELAPSE_STORAGE,
+    MIN_FREE_BYTES,
+    ensure_writable,
+    external_storage_path,
+    free_bytes,
+)
 
-MIN_FREE_BYTES = 50 * 1024 * 1024
-INTERNAL_STORAGE = Path.home() / "Microplaite" / "timelapse"
+INTERNAL_STORAGE = INTERNAL_TIMELAPSE_STORAGE
 
 
 @dataclass(slots=True)
@@ -195,26 +199,10 @@ class TimelapseService:
         return INTERNAL_STORAGE
 
     def external_storage_path(self) -> Path | None:
-        candidates: list[Path] = []
-        for root in (Path("/media") / os.environ.get("USER", ""), Path("/media"), Path("/mnt")):
-            if not root.exists():
-                continue
-            try:
-                for child in root.iterdir():
-                    if child.is_dir() and os.access(child, os.W_OK):
-                        candidates.append(child)
-            except OSError:
-                continue
-        return candidates[0] if candidates else None
+        return external_storage_path()
 
     def free_bytes(self, path: Path) -> int:
-        try:
-            target = path if path.exists() else path.parent
-            while not target.exists() and target != target.parent:
-                target = target.parent
-            return shutil.disk_usage(target).free
-        except OSError:
-            return 0
+        return free_bytes(path)
 
     def _run_timelapse(self, settings: TimelapseSettings, session_dir: Path) -> None:
         started = time.monotonic()
@@ -300,14 +288,7 @@ class TimelapseService:
         return session_dir
 
     def _ensure_writable(self, path: Path) -> None:
-        if str(path) == "/media":
-            raise RuntimeError("external disk absent or not writable")
-        path.mkdir(parents=True, exist_ok=True)
-        if self.free_bytes(path) < MIN_FREE_BYTES:
-            raise RuntimeError("disk space too low")
-        probe = path / ".microplaite_write_test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        ensure_writable(path)
 
     def _validated(self, settings: TimelapseSettings) -> TimelapseSettings:
         return TimelapseSettings(
