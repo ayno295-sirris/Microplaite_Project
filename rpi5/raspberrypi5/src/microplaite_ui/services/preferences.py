@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from microplaite_ui.config import APP_NAME, DEFAULT_TARGET_C
+from microplaite_ui.config import APP_NAME, DEFAULT_TARGET_C, THERMAL_TEST_MAX_TARGET_C
 
 
 PREFERENCES_PATH_ENV = "MICROPLAITE_PREFERENCES_PATH"
@@ -63,7 +63,13 @@ def _validated(raw: dict[str, Any]) -> UserPreferences:
     names = {field.name for field in fields(UserPreferences)}
     values = {key: raw[key] for key in names if key in raw}
     prefs = UserPreferences(**values)
-    prefs.target_c = _clamp_float(prefs.target_c, 0.0, 80.0, DEFAULT_TARGET_C, 2)
+    prefs.target_c = _clamp_float(
+        prefs.target_c,
+        0.0,
+        THERMAL_TEST_MAX_TARGET_C,
+        DEFAULT_TARGET_C,
+        2,
+    )
     prefs.pump_target_rpm = _clamp_float(prefs.pump_target_rpm, 0.0, 100.0, 50.0, 1)
     prefs.neopixel_enabled = bool(prefs.neopixel_enabled)
     prefs.neopixel_brightness_percent = _clamp_int(prefs.neopixel_brightness_percent, 0, 100, 80)

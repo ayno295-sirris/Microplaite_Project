@@ -12,6 +12,7 @@ from microplaite_ui.config import (
     DEFAULT_PID_KI,
     DEFAULT_PID_KP,
     DEFAULT_PID_LIMIT,
+    THERMAL_TEST_MAX_TARGET_C,
 )
 from microplaite_ui.core.state import AppState
 from microplaite_ui.esp32.client import Esp32Client, Esp32ClientError
@@ -80,8 +81,8 @@ class AppController:
         return self.state
 
     def set_target_from_ui(self, temp_c: float) -> AppState:
-        self.state.target_c = temp_c
-        return self._call(lambda: self.client.set_target(temp_c))
+        self.state.target_c = max(0.0, min(THERMAL_TEST_MAX_TARGET_C, float(temp_c)))
+        return self._call(lambda: self.client.set_target(self.state.target_c))
 
     def set_neopixel_enabled(self, enabled: bool) -> str:
         self.state.neopixel.enabled = enabled
