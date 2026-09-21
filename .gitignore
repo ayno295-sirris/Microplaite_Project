@@ -48,3 +48,6 @@ thermal_characterization/logs/
 
 # Local backups
 git_backups/
+
+# Local Superpowers visual companion sessions
+.superpowers/

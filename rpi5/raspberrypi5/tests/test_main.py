@@ -665,6 +665,21 @@ def test_temperature_dashboard_controls_pid_and_setpoint() -> None:
     ]
 
 
+def test_temperature_setpoint_is_limited_to_experimental_maximum() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    client = RecordingClient()
+    window = MainWindow(AppController(client))
+    window.timer.stop()
+    window.controller.state.target_c = 59.9
+    client.commands.clear()
+
+    window._nudge_target(0.1)
+    window._nudge_target(0.1)
+
+    assert window.controller.state.target_c == 60.0
+    assert client.commands == ["SET_TARGET 60.00", "SET_TARGET 60.00"]
+
+
 def test_main_window_restores_user_preferences_between_sessions() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     first = MainWindow(AppController(FakeEsp32Client()))

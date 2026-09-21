@@ -61,7 +61,7 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
 
     prefs = PreferencesStore(path).load()
 
-    assert prefs.target_c == 80.0
+    assert prefs.target_c == 60.0
     assert prefs.pump_target_rpm == 0.0
     assert prefs.neopixel_brightness_percent == 100
     assert prefs.timelapse_storage_mode == "internal"
