@@ -2,6 +2,26 @@
 
 This document lists the existing ESP32 firmware serial commands. It documents the current command surface only and does not change the firmware behavior.
 
+## Temporary Thermal Test Mode — 2026-08-27
+
+The current source temporarily sets `constexpr bool THERMAL_TEST_MODE = true;` for supervised thermal trials. In this mode, the maximum accepted target is `60.00 C`, the warning threshold is `60.00 C`, and the latched `OVERTEMP` emergency cutoff is `62.00 C`.
+
+This experimental range has not been validated on hardware by this firmware change. Keep every trial continuously supervised and keep a physical means of disconnecting heater power immediately accessible. Thermal inertia can continue increasing temperature after the output is disabled.
+
+To restore the normal limits, edit `include/configSafety.h`, change exactly:
+
+```cpp
+constexpr bool THERMAL_TEST_MODE = true;
+```
+
+to:
+
+```cpp
+constexpr bool THERMAL_TEST_MODE = false;
+```
+
+Then rebuild with `pio run`. The active limits automatically return to maximum target `37.50 C`, warning `37.80 C`, and emergency cutoff `38.00 C`. The default target remains `37.50 C` in both modes.
+
 ## General Notes
 
 - Commands are sent as plain text over the serial interface.
@@ -30,6 +50,7 @@ This document lists the existing ESP32 firmware serial commands. It documents th
 - Role: prints the current firmware status, including temperature, target, heater/control state, PID state, limits, and error state.
 - Example: `STATUS`
 - Typical response: status line or multi-line status report with the current operating state.
+- Thermal-limit fields: text status adds `THERMAL_TEST_MODE`, `MAX_TARGET`, `WARNING_TEMP`, and the existing `SAFETY_LIMIT`; JSON status adds `thermal_test_mode`, `max_target_c`, `warning_temp_c`, and `emergency_cutoff_c`.
 - Safety note: use before and during heating tests to confirm that limits and states are correct.
 
 ### LOG_ON <period_ms>
@@ -72,7 +93,7 @@ This document lists the existing ESP32 firmware serial commands. It documents th
 - Role: sets the target temperature in degrees Celsius for control and PID modes.
 - Example: `SET_TARGET 37.50`
 - Typical response: acknowledgement with the new target temperature.
-- Safety note: do not set a target above the validated safety limit for the current bench setup.
+- Safety note: the temporary test mode accepts at most `60.00 C`; `60.01 C` and higher are rejected. Acceptance by the firmware does not constitute hardware validation.
 
 ### SET_POWER_LIMIT <percent>
 
@@ -135,4 +156,4 @@ This document lists the existing ESP32 firmware serial commands. It documents th
 - Role: clears a latched error state when the underlying condition has been removed.
 - Example: `CLEAR_ERROR`
 - Typical response: acknowledgement that the error state has been cleared, or a message indicating that clearing is not possible yet.
-- Safety note: do not clear an error until the cause has been understood and the hardware is safe.
+- Safety note: clearing is refused while the sensor is invalid or while temperature is at or above the active emergency cutoff (`62.00 C` in temporary test mode).

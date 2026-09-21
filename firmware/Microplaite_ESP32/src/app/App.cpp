@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "configSafety.h"
 #include "configSerial.h"
 #include "pins.h"
 
@@ -16,6 +17,15 @@ App::App()
 void App::begin()
 {
     Serial.begin(SERIAL_BAUD);
+    if (THERMAL_TEST_MODE) {
+        Serial.print("WARNING THERMAL_TEST_MODE MAX_TARGET ");
+        Serial.print(SAFETY_MAX_TARGET_TEMP_C, 2);
+        Serial.print("C WARNING_TEMP ");
+        Serial.print(SAFETY_WARNING_TEMP_C, 2);
+        Serial.print("C EMERGENCY_CUTOFF ");
+        Serial.print(SAFETY_ERROR_TEMP_C, 2);
+        Serial.println("C");
+    }
     beginNeoPixel();
     _heater.begin();
     _pump.begin();

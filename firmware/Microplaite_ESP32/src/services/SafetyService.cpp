@@ -30,7 +30,7 @@ void SafetyService::update(AppState& state)
         return;
     }
 
-    if (state.temperatureC >= SAFETY_ERROR_TEMP_C) {
+    if (isEmergencyOvertemperature(state.temperatureC)) {
         state.errorLatched = true;
         state.lastError = "OVERTEMP";
         state.safetyLevel = SafetyLevel::ERROR;
@@ -41,7 +41,7 @@ void SafetyService::update(AppState& state)
         return;
     }
 
-    if (state.temperatureC >= SAFETY_WARNING_TEMP_C) {
+    if (isThermalWarning(state.temperatureC)) {
         state.safetyLevel = SafetyLevel::WARNING;
         _lastLevel = state.safetyLevel;
         return;
