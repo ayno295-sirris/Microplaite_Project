@@ -2,6 +2,20 @@
 
 This procedure is a short operational checklist for the validated ESP32 firmware behavior. It does not require code changes, compilation, flashing, or hardware automation.
 
+## 0. Temporary Thermal Test Configuration — 2026-08-27
+
+The current source enables the temporary experimental `THERMAL_TEST_MODE`. Its active limits are:
+
+- maximum target: `60.00 C`;
+- warning threshold: `60.00 C`;
+- latched `OVERTEMP` emergency cutoff: `62.00 C`.
+
+This configuration only moves the active limits; it does not remove the emergency cutoff, sensor-fault blocking, output shutdown, manual timeout, `STOP`, or the PID output limit of `15 %`. The default target and PID parameters remain the validated `37.50 C`, `Kp=8.00`, `Ki=0.03`, and `Kd=20.00`.
+
+No hardware heating test is validated by this source change. Keep tests continuously supervised and keep a physical means of cutting heater power immediately accessible.
+
+To return to normal operation, change `constexpr bool THERMAL_TEST_MODE = true;` to `constexpr bool THERMAL_TEST_MODE = false;` in `include/configSafety.h`, run `pio run`, and verify that `STATUS` reports `MAX_TARGET 37.50C`, `WARNING_TEMP 37.80C`, and `SAFETY_LIMIT 38.00C` before flashing.
+
 ## 1. Hardware Preparation
 
 - Connect the ESP32 firmware target using the validated bench wiring.
@@ -83,7 +97,8 @@ Safety: the system has strong thermal inertia. Do not increase `PID_LIMIT` abrup
 1. If an error is latched, remove the cause first.
 2. Send `CLEAR_ERROR`.
 3. Send `STATUS`.
-4. Confirm that the error is cleared only when the underlying condition is safe.
+4. Confirm that the error is refused if the sensor is invalid or temperature is at or above the active emergency cutoff.
+5. Confirm that the error is cleared only when the sensor is valid and temperature is below the active emergency cutoff.
 
 ## 9. NeoPixel Validation
 
@@ -100,5 +115,6 @@ Safety: the system has strong thermal inertia. Do not increase `PID_LIMIT` abrup
 - `PID_ON` and `PID_OFF` operate with the reference PID settings.
 - `STOP` reliably stops heating output.
 - `CLEAR_ERROR` clears errors only after safe recovery.
+- `STATUS` reports the selected thermal-test mode and all three active thermal limits.
 - NeoPixel fixed white indication is validated.
 - No safety limit violation occurs during the validated test procedure.

@@ -2,6 +2,14 @@
 
 This document records the PID parameters validated on the bench for autonomous ESP32 heating at `37.50 C`.
 
+## Temporary Experimental Limits — 2026-08-27
+
+The current source temporarily enables `THERMAL_TEST_MODE` for supervised trials up to a `60.00 C` target. The active warning threshold is `60.00 C` and the latched `OVERTEMP` emergency cutoff is `62.00 C`. These elevated limits have not been validated on hardware by this change.
+
+The PID gains, `15.0 %` PID output limit, and default `37.50 C` target below remain unchanged. Keep every trial continuously supervised with a physical means of cutting heater power immediately accessible.
+
+To restore the normal `37.50/37.80/38.00 C` limits, change `constexpr bool THERMAL_TEST_MODE = true;` to `constexpr bool THERMAL_TEST_MODE = false;` in `include/configSafety.h`, rebuild with `pio run`, and verify the limits reported by `STATUS` before flashing.
+
 ## Validated Reference Parameters
 
 | Parameter | Reference value |

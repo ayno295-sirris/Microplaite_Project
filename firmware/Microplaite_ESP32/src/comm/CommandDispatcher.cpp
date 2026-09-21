@@ -61,7 +61,7 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
             sendError(id, cmd, "MISSING_TARGET_C", out);
             return;
         }
-        if (targetC < SAFETY_MIN_TARGET_TEMP_C || targetC > SAFETY_MAX_TARGET_TEMP_C) {
+        if (!isTargetTemperatureAllowed(targetC)) {
             sendError(id, cmd, "TARGET_UNSAFE", out);
             return;
         }
@@ -72,7 +72,16 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
     }
 
     if (strcmp(cmd, "HEATER_ENABLE") == 0) {
-        if (!_state.temperatureValid || _state.safetyLevel == SafetyLevel::ERROR) {
+        if (_state.temperatureValid && isEmergencyOvertemperature(_state.temperatureC)) {
+            _state.errorLatched = true;
+            _state.lastError = "OVERTEMP";
+            _state.safetyLevel = SafetyLevel::ERROR;
+            _heater.disable();
+            syncHeaterState();
+            sendError(id, cmd, "OVERTEMP", out);
+            return;
+        }
+        if (!_state.temperatureValid || isnan(_state.temperatureC) || _state.errorLatched || _state.safetyLevel == SafetyLevel::ERROR) {
             sendError(id, cmd, "HEATER_UNSAFE", out);
             return;
         }
@@ -497,7 +506,7 @@ bool CommandDispatcher::ensureSafeTemperatureForHeating(Print& out, bool latchSe
         return false;
     }
 
-    if (_state.temperatureC >= SAFETY_ERROR_TEMP_C) {
+    if (isEmergencyOvertemperature(_state.temperatureC)) {
         _state.errorLatched = true;
         _state.lastError = "OVERTEMP";
         _heater.disable();
@@ -542,6 +551,14 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(_state.heaterEnabled ? "true" : "false");
     out.print(",\"heater_target_c\":");
     out.print(_state.heaterTargetC, 2);
+    out.print(",\"thermal_test_mode\":");
+    out.print(THERMAL_TEST_MODE ? "true" : "false");
+    out.print(",\"max_target_c\":");
+    out.print(SAFETY_MAX_TARGET_TEMP_C, 2);
+    out.print(",\"warning_temp_c\":");
+    out.print(SAFETY_WARNING_TEMP_C, 2);
+    out.print(",\"emergency_cutoff_c\":");
+    out.print(SAFETY_ERROR_TEMP_C, 2);
     out.print(",\"heater_output_percent\":");
     out.print(_state.heaterOutputPercent, 1);
     out.print(",\"power_limit_percent\":");
@@ -614,7 +631,13 @@ void CommandDispatcher::sendTextStatus(Print& out) const
     out.print(ONOFF_HYSTERESIS_C, 2);
     out.print("C HEATER_OUTPUT ");
     out.print(_heater.outputPercent(), 1);
-    out.print("% SAFETY_LIMIT ");
+    out.print("% THERMAL_TEST_MODE ");
+    out.print(THERMAL_TEST_MODE ? 1 : 0);
+    out.print(" MAX_TARGET ");
+    out.print(SAFETY_MAX_TARGET_TEMP_C, 2);
+    out.print("C WARNING_TEMP ");
+    out.print(SAFETY_WARNING_TEMP_C, 2);
+    out.print("C SAFETY_LIMIT ");
     out.print(SAFETY_ERROR_TEMP_C, 2);
     out.print("C POWER_LIMIT ");
     out.print(_heater.controlPowerLimitPercent(), 1);
@@ -766,7 +789,7 @@ void CommandDispatcher::sendTextSetTarget(const char* args, Print& out)
         return;
     }
 
-    if (targetC < SAFETY_MIN_TARGET_TEMP_C || targetC > SAFETY_MAX_TARGET_TEMP_C) {
+    if (!isTargetTemperatureAllowed(targetC)) {
         out.println("ERR BAD_TARGET");
         return;
     }
@@ -826,7 +849,7 @@ void CommandDispatcher::sendTextClearError(Print& out)
         return;
     }
 
-    if (_state.temperatureC >= SAFETY_ERROR_TEMP_C) {
+    if (!canClearThermalError(_state.temperatureC, _state.temperatureValid)) {
         _heater.disable();
         out.println("ERR OVERTEMP");
         return;
