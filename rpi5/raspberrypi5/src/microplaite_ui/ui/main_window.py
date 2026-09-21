@@ -42,7 +42,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from microplaite_ui.config import DEFAULT_LOG_PERIOD_MS, SCREEN_HEIGHT, SCREEN_WIDTH
+from microplaite_ui.config import (
+    DEFAULT_LOG_PERIOD_MS,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    THERMAL_TEST_MAX_TARGET_C,
+)
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, derive_system_status
 from microplaite_ui.services.preferences import PreferencesStore, UserPreferences
@@ -1758,7 +1763,7 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _nudge_target(self, delta: float) -> None:
-        target = max(0.0, min(80.0, self.controller.state.target_c + delta))
+        target = max(0.0, min(THERMAL_TEST_MAX_TARGET_C, self.controller.state.target_c + delta))
         self.controller.set_target_from_ui(target)
         self._save_preferences()
         self._render()
