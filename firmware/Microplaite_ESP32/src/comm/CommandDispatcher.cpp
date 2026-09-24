@@ -582,6 +582,8 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(_state.pumpRpm, 1);
     out.print(",\"pump_full_speed\":");
     out.print(_state.pumpFullSpeed ? "true" : "false");
+    out.print(",\"pump_readback\":");
+    out.print(_state.pumpReadbackValid ? "true" : "false");
     out.print(",\"neopixel_enabled\":");
     out.print(_state.neopixelEnabled ? "true" : "false");
     out.print(",\"neopixel_brightness\":");
@@ -982,11 +984,10 @@ void CommandDispatcher::sendTextPumpPrime(Print& out)
 
 void CommandDispatcher::sendTextPumpStatus(Print& out)
 {
-    const bool readback = _pump.readStatus(_state);
+    _pump.readStatus(_state);
     out.print("OK PUMP_STATUS");
     printPumpFields(out);
-    out.print(" PUMP_READBACK ");
-    out.println(readback ? 1 : 0);
+    out.println();
 }
 
 void CommandDispatcher::printPumpFields(Print& out) const
@@ -997,6 +998,8 @@ void CommandDispatcher::printPumpFields(Print& out) const
     out.print(_state.pumpRpm, 1);
     out.print(" PUMP_FULL_SPEED ");
     out.print(_state.pumpFullSpeed ? 1 : 0);
+    out.print(" PUMP_READBACK ");
+    out.print(_state.pumpReadbackValid ? 1 : 0);
 }
 
 void CommandDispatcher::sendTextNeoPixelOn(Print& out)
