@@ -107,6 +107,7 @@ void HeaterService::disable()
 void HeaterService::stop()
 {
     disable();
+    _manualTestEndMs = 0;
 }
 
 void HeaterService::setTargetC(float targetC)
