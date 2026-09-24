@@ -20,6 +20,7 @@ struct AppState {
     bool pumpRunning = false;
     float pumpRpm = 0.0f;
     bool pumpFullSpeed = false;
+    bool pumpReadbackValid = false; // Only a valid RJ confirms the pump fields.
 
     bool neopixelEnabled = true;
     uint8_t neopixelBrightnessPercent = 50;
