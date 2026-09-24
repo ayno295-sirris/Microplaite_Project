@@ -23,10 +23,13 @@ bool PumpService::setRpm(float rpm, AppState& state)
 
 bool PumpService::stop(AppState& state)
 {
+    for (int pending = Serial1.available(); pending > 0; --pending) {
+        Serial1.read();
+    }
     if (!writePump(0.0f, false, false, state)) {
         return false;
     }
-    readStatus(state);
+    readStatus(state, RESPONSE_TIMEOUT_MS, true);
     return true; // WJ sent; pumpReadbackValid qualifies the controller state.
 }
 
@@ -37,6 +40,11 @@ bool PumpService::prime(AppState& state)
 
 bool PumpService::readStatus(AppState& state, uint32_t timeoutMs)
 {
+    return readStatus(state, timeoutMs, false);
+}
+
+bool PumpService::readStatus(AppState& state, uint32_t timeoutMs, bool waitForWriteReply)
+{
     state.pumpReadbackValid = false;
     uint8_t tx[LongerProtocol::MAX_FRAME_SIZE] = {0};
     const size_t txLength = LongerProtocol::buildReadFrame(PUMP_ADDRESS, tx, sizeof(tx));
@@ -44,17 +52,19 @@ bool PumpService::readStatus(AppState& state, uint32_t timeoutMs)
         return false;
     }
 
-    while (Serial1.available() > 0) {
-        Serial1.read();
+    if (!waitForWriteReply) {
+        while (Serial1.available() > 0) {
+            Serial1.read();
+        }
+        if (Serial1.write(tx, txLength) != txLength) {
+            return false;
+        }
+        Serial1.flush();
     }
-    if (Serial1.write(tx, txLength) != txLength) {
-        return false;
-    }
-    Serial1.flush();
 
     uint8_t rx[LongerProtocol::MAX_FRAME_SIZE] = {0};
     size_t rxLength = 0;
-    const uint32_t startMs = millis();
+    const uint32_t startMs = millis(); // STOP shares this budget between WJ and RJ replies.
     while (millis() - startMs < timeoutMs) {
         if (Serial1.available() <= 0) {
             delay(1);
@@ -72,6 +82,21 @@ bool PumpService::readStatus(AppState& state, uint32_t timeoutMs)
             continue;
         }
         rx[rxLength++] = byte;
+        if (waitForWriteReply) {
+            if (!LongerProtocol::parseWriteReplyFrame(rx, rxLength, PUMP_ADDRESS)) {
+                continue;
+            }
+            if (millis() - startMs >= timeoutMs) {
+                return false;
+            }
+            if (Serial1.write(tx, txLength) != txLength) {
+                return false;
+            }
+            Serial1.flush();
+            waitForWriteReply = false;
+            rxLength = 0;
+            continue;
+        }
         LongerProtocol::PumpStatus status;
         if (LongerProtocol::parseStatusFrame(rx, rxLength, PUMP_ADDRESS, status)) {
             state.pumpRunning = status.running;

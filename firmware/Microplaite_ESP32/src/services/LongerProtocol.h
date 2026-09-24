@@ -16,6 +16,7 @@ struct PumpStatus {
 
 size_t buildWriteFrame(uint8_t addr, float rpm, bool run, bool fullSpeed, uint8_t* out, size_t outSize);
 size_t buildReadFrame(uint8_t addr, uint8_t* out, size_t outSize);
+bool parseWriteReplyFrame(const uint8_t* frame, size_t frameSize, uint8_t addr);
 bool parseStatusFrame(const uint8_t* frame, size_t frameSize, uint8_t addr, PumpStatus& status);
 bool selfCheck();
 

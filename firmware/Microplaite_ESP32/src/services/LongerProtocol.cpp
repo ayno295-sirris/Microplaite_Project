@@ -125,6 +125,20 @@ size_t buildReadFrame(uint8_t addr, uint8_t* out, size_t outSize)
     return buildFrame(addr, PDU_READ_STATE, sizeof(PDU_READ_STATE), out, outSize);
 }
 
+bool parseWriteReplyFrame(const uint8_t* frame, size_t frameSize, uint8_t addr)
+{
+    uint8_t body[5] = {0};
+    size_t bodyLength = 0;
+    if (!unstuffFrame(frame, frameSize, body, sizeof(body), bodyLength)) {
+        return false;
+    }
+    if (bodyLength != 5 || body[0] != addr || body[1] != 2) {
+        return false;
+    }
+    return body[2] == PDU_WRITE_PARAMS[0] && body[3] == PDU_WRITE_PARAMS[1]
+        && xorFcs(body, bodyLength - 1) == body[bodyLength - 1];
+}
+
 bool parseStatusFrame(const uint8_t* frame, size_t frameSize, uint8_t addr, PumpStatus& status)
 {
     uint8_t body[10] = {0};
