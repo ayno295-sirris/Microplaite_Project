@@ -202,6 +202,7 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
         float brightness = 0;
         error = JsonProtocol::boolean(request.get(), "enabled", enabled);
         if (!error) error = JsonProtocol::number(request.get(), "brightness", 0, 100, brightness);
+        if (!error && enabled) error = _supervision.activationError(millis());
         if (error) {
             sendError(id, cmd, error, out);
             return;

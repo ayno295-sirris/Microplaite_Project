@@ -28,8 +28,8 @@ struct AppState {
     bool pumpFullSpeed = false;
     bool pumpReadbackValid = false; // Only a valid RJ confirms the pump fields.
 
-    bool neopixelEnabled = true;
-    uint8_t neopixelBrightnessPercent = 50;
+    bool neopixelEnabled = false;
+    uint8_t neopixelBrightnessPercent = 0;
 
     SafetyLevel safetyLevel = SafetyLevel::OK;
     bool errorLatched = false;

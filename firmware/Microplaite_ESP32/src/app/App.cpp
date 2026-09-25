@@ -17,6 +17,10 @@ App::App()
 
 void App::begin()
 {
+    _heater.begin(); // GPIO OFF, all heating modes and manual timer reset first.
+    beginNeoPixel();
+    _pump.begin();
+    _pump.stop(_state); // Bounded existing WJ/RJ sequence; readback qualifies STOP.
     Serial.begin(SERIAL_BAUD);
     if (THERMAL_TEST_MODE) {
         Serial.print("WARNING THERMAL_TEST_MODE MAX_TARGET ");
@@ -27,9 +31,6 @@ void App::begin()
         Serial.print(SAFETY_ERROR_TEMP_C, 2);
         Serial.println("C");
     }
-    beginNeoPixel();
-    _heater.begin();
-    _pump.begin();
     _temperature.begin();
     _safety.begin();
     _serialCommands.begin(Serial);
@@ -66,8 +67,8 @@ void App::updateState()
 void App::beginNeoPixel()
 {
     _neopixel.begin();
-    _neopixel.setBrightness((static_cast<uint16_t>(_state.neopixelBrightnessPercent) * 255U) / 100U);
-    _neopixel.fill(_neopixel.Color(255, 255, 255, 255));
+    _neopixel.setBrightness(0);
+    _neopixel.clear();
     _neopixel.show();
 }
 
