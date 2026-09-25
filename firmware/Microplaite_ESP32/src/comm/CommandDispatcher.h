@@ -14,6 +14,7 @@ public:
 
     void dispatch(const char* line, Print& out);
     void sendLineTooLong(Print& out);
+    void sendMalformedJson(Print& out);
 
 private:
     AppState& _state;
@@ -26,16 +27,14 @@ private:
     bool parseUint32Arg(const char* args, uint32_t& value) const;
     bool parseFloatArg(const char* args, float& value) const;
     bool parsePidValues(const char* args, float& kp, float& ki, float& kd) const;
-    bool parseCommand(const char* line, long& id, char* cmd, size_t cmdSize, const char*& error) const;
-    bool looksLikeJsonObject(const char* line) const;
-    bool readId(const char* line, long& id) const;
-    bool readCmd(const char* line, char* cmd, size_t cmdSize) const;
-    bool readFloatField(const char* line, const char* key, float& value) const;
     const char* safetyText() const;
+    const char* heaterModeText() const;
     void syncTemperatureState();
     void syncHeaterState();
     bool readTemperatureIntoState();
     bool ensureSafeTemperatureForHeating(Print& out, bool latchSensorError);
+    const char* checkTemperatureForHeating(bool latchSensorError);
+    const char* clearError();
 
     void sendPing(long id, Print& out) const;
     void sendOk(long id, const char* cmd, Print& out) const;
@@ -71,5 +70,7 @@ private:
     void applyNeoPixel();
     void printNeoPixelFields(Print& out) const;
     void sendStop(long id, Print& out);
+    void printJsonPumpFields(Print& out) const;
+    void sendPumpResult(long id, const char* cmd, bool written, Print& out) const;
     void sendError(long id, const char* cmd, const char* error, Print& out) const;
 };

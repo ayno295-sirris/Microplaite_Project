@@ -1,4 +1,5 @@
 #include "comm/CommandDispatcher.h"
+#include "comm/JsonProtocol.h"
 
 #include "configPID.h"
 #include "configSafety.h"
@@ -7,6 +8,22 @@
 #include <ctype.h>
 #include <cstdlib>
 #include <cstring>
+#include <cfloat>
+#include <cstdio>
+
+namespace {
+void printJsonNumber(Print& out, float value, int decimals)
+{
+    if (!std::isfinite(value)) {
+        out.print("null");
+        return;
+    }
+    // Arduino Print emits "ovf" for large finite floats, which is not valid JSON.
+    char buffer[48];
+    snprintf(buffer, sizeof(buffer), "%.*f", decimals, static_cast<double>(value));
+    out.print(buffer);
+}
+}
 
 CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel)
     : _state(state),
@@ -19,10 +36,6 @@ CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, Tem
 
 void CommandDispatcher::dispatch(const char* line, Print& out)
 {
-    long id = 0;
-    char cmd[24] = {0};
-    const char* error = "MALFORMED_COMMAND";
-
     const char* trimmedLine = line;
     while (*trimmedLine != '\0' && isspace(static_cast<unsigned char>(*trimmedLine))) {
         trimmedLine++;
@@ -35,8 +48,12 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
         return;
     }
 
-    if (!parseCommand(line, id, cmd, sizeof(cmd), error)) {
-        sendError(id, "UNKNOWN", error, out);
+    JsonProtocol::Document request(JsonProtocol::parse(line), cJSON_Delete);
+    long id = 0;
+    const char* cmd = "UNKNOWN";
+    const char* error = JsonProtocol::envelope(request.get(), id, cmd);
+    if (error) {
+        sendError(id, cmd, error, out);
         return;
     }
 
@@ -55,14 +72,24 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
         return;
     }
 
+    if (strcmp(cmd, "SYNC") == 0 || strcmp(cmd, "HEARTBEAT") == 0) {
+        sendError(id, cmd, "NOT_IMPLEMENTED", out);
+        return;
+    }
+
+    if (strcmp(cmd, "CLEAR_ERROR") == 0) {
+        error = clearError();
+        syncHeaterState();
+        if (error) sendError(id, cmd, error, out);
+        else sendOk(id, cmd, out);
+        return;
+    }
+
     if (strcmp(cmd, "HEATER_SET_TARGET") == 0) {
         float targetC = 0.0f;
-        if (!readFloatField(line, "target_c", targetC)) {
-            sendError(id, cmd, "MISSING_TARGET_C", out);
-            return;
-        }
-        if (!isTargetTemperatureAllowed(targetC)) {
-            sendError(id, cmd, "TARGET_UNSAFE", out);
+        error = JsonProtocol::number(request.get(), "target_c", SAFETY_MIN_TARGET_TEMP_C, SAFETY_MAX_TARGET_TEMP_C, targetC);
+        if (error) {
+            sendError(id, cmd, error, out);
             return;
         }
         _heater.setTargetC(targetC);
@@ -71,21 +98,53 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
         return;
     }
 
+    if (strcmp(cmd, "HEATER_SET_PID") == 0) {
+        float kp = 0, ki = 0, kd = 0;
+        error = JsonProtocol::number(request.get(), "kp", 0, FLT_MAX, kp);
+        if (!error) error = JsonProtocol::number(request.get(), "ki", 0, FLT_MAX, ki);
+        if (!error) error = JsonProtocol::number(request.get(), "kd", 0, FLT_MAX, kd);
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
+        _heater.setPid(kp, ki, kd);
+        sendOk(id, cmd, out);
+        return;
+    }
+
+    if (strcmp(cmd, "HEATER_SET_PID_LIMIT") == 0 || strcmp(cmd, "HEATER_SET_POWER_LIMIT") == 0) {
+        const bool pid = strcmp(cmd, "HEATER_SET_PID_LIMIT") == 0;
+        float percent = 0;
+        error = JsonProtocol::number(request.get(), "percent", pid ? 0 : CONTROL_POWER_LIMIT_MIN_PERCENT, HEATER_OUTPUT_MAX_PERCENT, percent);
+        if (!error && pid && percent <= 0) error = "OUT_OF_RANGE";
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
+        if (pid) _heater.setPidOutputLimitPercent(percent);
+        else _heater.setControlPowerLimitPercent(percent);
+        syncHeaterState();
+        sendOk(id, cmd, out);
+        return;
+    }
+
     if (strcmp(cmd, "HEATER_ENABLE") == 0) {
-        if (_state.temperatureValid && isEmergencyOvertemperature(_state.temperatureC)) {
-            _state.errorLatched = true;
-            _state.lastError = "OVERTEMP";
-            _state.safetyLevel = SafetyLevel::ERROR;
-            _heater.disable();
+        const char* mode = nullptr;
+        error = JsonProtocol::string(request.get(), "mode", mode);
+        if (!error && strcmp(mode, "PID") != 0 && strcmp(mode, "ONOFF") != 0) error = "BAD_MODE";
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
+        // Same fresh-temperature check and latch behavior as legacy PID_ON / CONTROL_ON.
+        error = checkTemperatureForHeating(true);
+        if (error) {
             syncHeaterState();
-            sendError(id, cmd, "OVERTEMP", out);
+            sendError(id, cmd, error, out);
             return;
         }
-        if (!_state.temperatureValid || isnan(_state.temperatureC) || _state.errorLatched || _state.safetyLevel == SafetyLevel::ERROR) {
-            sendError(id, cmd, "HEATER_UNSAFE", out);
-            return;
-        }
-        _heater.enable();
+        if (strcmp(mode, "PID") == 0) _heater.enablePid();
+        else _heater.enable();
         syncHeaterState();
         sendOk(id, cmd, out);
         return;
@@ -98,12 +157,63 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
         return;
     }
 
+    if (strcmp(cmd, "PUMP_START") == 0 || strcmp(cmd, "PUMP_SET_RPM") == 0) {
+        float rpm = 0;
+        error = JsonProtocol::number(request.get(), "rpm", 0, PUMP_MAX_RPM, rpm);
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
+        const bool written = strcmp(cmd, "PUMP_START") == 0 ? _pump.start(rpm, _state) : _pump.setRpm(rpm, _state);
+        sendPumpResult(id, cmd, written, out);
+        return;
+    }
+
+    if (strcmp(cmd, "PUMP_STOP") == 0) {
+        const bool written = _pump.stop(_state);
+        sendPumpResult(id, cmd, written, out);
+        return;
+    }
+
+    if (strcmp(cmd, "PUMP_PRIME") == 0) {
+        const bool written = _pump.prime(_state);
+        sendPumpResult(id, cmd, written, out);
+        return;
+    }
+
+    if (strcmp(cmd, "PUMP_STATUS") == 0) {
+        _pump.readStatus(_state);
+        sendPumpResult(id, cmd, true, out); // The readback flag reports RJ success or failure.
+        return;
+    }
+
+    if (strcmp(cmd, "NEOPIXEL_SET") == 0) {
+        bool enabled = false;
+        float brightness = 0;
+        error = JsonProtocol::boolean(request.get(), "enabled", enabled);
+        if (!error) error = JsonProtocol::number(request.get(), "brightness", 0, 100, brightness);
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
+        _state.neopixelEnabled = enabled;
+        _state.neopixelBrightnessPercent = static_cast<uint8_t>(brightness + 0.5f);
+        applyNeoPixel();
+        sendOk(id, cmd, out);
+        return;
+    }
+
     sendError(id, cmd, "UNKNOWN_COMMAND", out);
 }
 
 void CommandDispatcher::sendLineTooLong(Print& out)
 {
     sendError(0, "UNKNOWN", "LINE_TOO_LONG", out);
+}
+
+void CommandDispatcher::sendMalformedJson(Print& out)
+{
+    sendError(0, "UNKNOWN", "MALFORMED_JSON", out);
 }
 
 bool CommandDispatcher::dispatchTextCommand(const char* line, Print& out)
@@ -345,114 +455,6 @@ bool CommandDispatcher::parsePidValues(const char* args, float& kp, float& ki, f
     return kp >= 0.0f && ki >= 0.0f && kd >= 0.0f;
 }
 
-bool CommandDispatcher::parseCommand(const char* line, long& id, char* cmd, size_t cmdSize, const char*& error) const
-{
-    if (!looksLikeJsonObject(line)) {
-        error = "MALFORMED_JSON";
-        return false;
-    }
-
-    if (!readId(line, id)) {
-        error = "MISSING_ID";
-        return false;
-    }
-
-    if (!readCmd(line, cmd, cmdSize)) {
-        error = "MISSING_CMD";
-        return false;
-    }
-
-    return true;
-}
-
-bool CommandDispatcher::looksLikeJsonObject(const char* line) const
-{
-    while (*line != '\0' && isspace(static_cast<unsigned char>(*line))) {
-        line++;
-    }
-
-    if (*line != '{') {
-        return false;
-    }
-
-    const char* end = line + strlen(line);
-    while (end > line && isspace(static_cast<unsigned char>(*(end - 1)))) {
-        end--;
-    }
-
-    return end > line && *(end - 1) == '}';
-}
-
-bool CommandDispatcher::readId(const char* line, long& id) const
-{
-    const char* key = strstr(line, "\"id\"");
-    if (key == nullptr) {
-        return false;
-    }
-
-    const char* colon = strchr(key, ':');
-    if (colon == nullptr) {
-        return false;
-    }
-
-    char* end = nullptr;
-    id = strtol(colon + 1, &end, 10);
-    return end != colon + 1;
-}
-
-bool CommandDispatcher::readCmd(const char* line, char* cmd, size_t cmdSize) const
-{
-    const char* key = strstr(line, "\"cmd\"");
-    if (key == nullptr) {
-        return false;
-    }
-
-    const char* colon = strchr(key, ':');
-    if (colon == nullptr) {
-        return false;
-    }
-
-    const char* start = strchr(colon, '"');
-    if (start == nullptr) {
-        return false;
-    }
-    start++;
-
-    const char* end = strchr(start, '"');
-    if (end == nullptr || end == start) {
-        return false;
-    }
-
-    const size_t length = static_cast<size_t>(end - start);
-    if (length >= cmdSize) {
-        return false;
-    }
-
-    memcpy(cmd, start, length);
-    cmd[length] = '\0';
-    return true;
-}
-
-bool CommandDispatcher::readFloatField(const char* line, const char* key, float& value) const
-{
-    char quotedKey[24] = {0};
-    snprintf(quotedKey, sizeof(quotedKey), "\"%s\"", key);
-
-    const char* found = strstr(line, quotedKey);
-    if (found == nullptr) {
-        return false;
-    }
-
-    const char* colon = strchr(found, ':');
-    if (colon == nullptr) {
-        return false;
-    }
-
-    char* end = nullptr;
-    value = strtof(colon + 1, &end);
-    return end != colon + 1;
-}
-
 const char* CommandDispatcher::safetyText() const
 {
     switch (_state.safetyLevel) {
@@ -465,6 +467,14 @@ const char* CommandDispatcher::safetyText() const
     }
 
     return "ERROR";
+}
+
+const char* CommandDispatcher::heaterModeText() const
+{
+    if (_heater.manualTestActive()) return "MANUAL";
+    if (_heater.pidEnabled()) return "PID";
+    if (_heater.enabled()) return "ONOFF";
+    return "IDLE";
 }
 
 void CommandDispatcher::syncTemperatureState()
@@ -490,10 +500,18 @@ bool CommandDispatcher::readTemperatureIntoState()
 
 bool CommandDispatcher::ensureSafeTemperatureForHeating(Print& out, bool latchSensorError)
 {
+    const char* error = checkTemperatureForHeating(latchSensorError);
+    if (!error) return true;
+    out.print("ERR ");
+    out.println(error);
+    return false;
+}
+
+const char* CommandDispatcher::checkTemperatureForHeating(bool latchSensorError)
+{
     if (_state.errorLatched) {
         _heater.disable();
-        out.println("ERR OVERTEMP");
-        return false;
+        return "OVERTEMP";
     }
 
     if (!readTemperatureIntoState()) {
@@ -502,19 +520,17 @@ bool CommandDispatcher::ensureSafeTemperatureForHeating(Print& out, bool latchSe
         }
         _state.lastError = _temperature.fault() != 0 ? "MAX31856_FAULT" : "SENSOR_INVALID";
         _heater.disable();
-        out.println("ERR SENSOR_INVALID");
-        return false;
+        return "SENSOR_INVALID";
     }
 
     if (isEmergencyOvertemperature(_state.temperatureC)) {
         _state.errorLatched = true;
         _state.lastError = "OVERTEMP";
         _heater.disable();
-        out.println("ERR OVERTEMP");
-        return false;
+        return "OVERTEMP";
     }
 
-    return true;
+    return nullptr;
 }
 
 void CommandDispatcher::sendPing(long id, Print& out) const
@@ -524,7 +540,7 @@ void CommandDispatcher::sendPing(long id, Print& out) const
 
 void CommandDispatcher::sendOk(long id, const char* cmd, Print& out) const
 {
-    out.print("{\"id\":");
+    out.print("{\"v\":2,\"id\":");
     out.print(id);
     out.print(",\"type\":\"OK\",\"cmd\":\"");
     out.print(cmd);
@@ -533,11 +549,11 @@ void CommandDispatcher::sendOk(long id, const char* cmd, Print& out) const
 
 void CommandDispatcher::sendStatus(long id, Print& out) const
 {
-    out.print("{\"id\":");
+    out.print("{\"v\":2,\"id\":");
     out.print(id);
-    out.print(",\"type\":\"STATUS\",\"temp_c\":");
+    out.print(",\"type\":\"STATUS\",\"cmd\":\"STATUS\",\"temp_c\":");
     if (_state.temperatureValid) {
-        out.print(_state.temperatureC, 2);
+        printJsonNumber(out, _state.temperatureC, 2);
     } else {
         out.print("null");
     }
@@ -547,10 +563,12 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(_state.temperatureValid ? "true" : "false");
     out.print(",\"temperature_fault\":");
     out.print(_state.temperatureFault);
-    out.print(",\"heater_enabled\":");
-    out.print(_state.heaterEnabled ? "true" : "false");
+    out.print(",\"heater_mode\":\"");
+    out.print(heaterModeText());
+    out.print("\",\"heater_gpio_on\":");
+    out.print(_heater.outputActive() ? "true" : "false");
     out.print(",\"heater_target_c\":");
-    out.print(_state.heaterTargetC, 2);
+    printJsonNumber(out, _heater.targetC(), 2);
     out.print(",\"thermal_test_mode\":");
     out.print(THERMAL_TEST_MODE ? "true" : "false");
     out.print(",\"max_target_c\":");
@@ -560,30 +578,25 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(",\"emergency_cutoff_c\":");
     out.print(SAFETY_ERROR_TEMP_C, 2);
     out.print(",\"heater_output_percent\":");
-    out.print(_state.heaterOutputPercent, 1);
+    printJsonNumber(out, _heater.outputPercent(), 1);
     out.print(",\"power_limit_percent\":");
-    out.print(_heater.controlPowerLimitPercent(), 1);
+    printJsonNumber(out, _heater.controlPowerLimitPercent(), 1);
     out.print(",\"pid_kp\":");
-    out.print(_heater.pidKp(), 2);
+    printJsonNumber(out, _heater.pidKp(), 2);
     out.print(",\"pid_ki\":");
-    out.print(_heater.pidKi(), 3);
+    printJsonNumber(out, _heater.pidKi(), 3);
     out.print(",\"pid_kd\":");
-    out.print(_heater.pidKd(), 2);
+    printJsonNumber(out, _heater.pidKd(), 2);
     out.print(",\"pid_output_limit_percent\":");
-    out.print(_heater.pidOutputLimitPercent(), 1);
+    printJsonNumber(out, _heater.pidOutputLimitPercent(), 1);
     out.print(",\"pid_integral\":");
-    out.print(_heater.pidIntegral(), 3);
+    printJsonNumber(out, _heater.pidIntegral(), 3);
     out.print(",\"last_error\":\"");
     out.print(_state.lastError);
     out.print("\"");
-    out.print(",\"pump_running\":");
-    out.print(_state.pumpRunning ? "true" : "false");
-    out.print(",\"pump_rpm\":");
-    out.print(_state.pumpRpm, 1);
-    out.print(",\"pump_full_speed\":");
-    out.print(_state.pumpFullSpeed ? "true" : "false");
-    out.print(",\"pump_readback\":");
-    out.print(_state.pumpReadbackValid ? "true" : "false");
+    out.print(",\"error_latched\":");
+    out.print(_state.errorLatched ? "true" : "false");
+    printJsonPumpFields(out);
     out.print(",\"neopixel_enabled\":");
     out.print(_state.neopixelEnabled ? "true" : "false");
     out.print(",\"neopixel_brightness\":");
@@ -591,7 +604,7 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(",\"safety\":\"");
     out.print(safetyText());
     out.print("\",\"uptime_ms\":");
-    out.print(_state.uptimeMs);
+    out.print(millis());
     out.println("}");
 }
 
@@ -845,22 +858,31 @@ void CommandDispatcher::sendTextControlOff(Print& out)
 
 void CommandDispatcher::sendTextClearError(Print& out)
 {
+    const char* error = clearError();
+    if (error) {
+        out.print("ERR ");
+        out.println(error);
+    } else {
+        out.println("OK ERROR CLEARED");
+    }
+}
+
+const char* CommandDispatcher::clearError()
+{
     if (!readTemperatureIntoState()) {
         _heater.disable();
-        out.println("ERR SENSOR_INVALID");
-        return;
+        return "SENSOR_INVALID";
     }
 
     if (!canClearThermalError(_state.temperatureC, _state.temperatureValid)) {
         _heater.disable();
-        out.println("ERR OVERTEMP");
-        return;
+        return "OVERTEMP";
     }
 
     _state.errorLatched = false;
     _state.lastError = "NONE";
     _state.safetyLevel = SafetyLevel::OK;
-    out.println("OK ERROR CLEARED");
+    return nullptr;
 }
 
 void CommandDispatcher::sendTextSetPid(const char* args, Print& out)
@@ -1065,19 +1087,48 @@ void CommandDispatcher::printNeoPixelFields(Print& out) const
 void CommandDispatcher::sendStop(long id, Print& out)
 {
     _heater.stop();
-    _pump.stop(_state);
+    const bool written = _pump.stop(_state);
     syncHeaterState();
 
-    sendOk(id, "STOP", out);
+    sendPumpResult(id, "STOP", written, out);
+}
+
+void CommandDispatcher::printJsonPumpFields(Print& out) const
+{
+    out.print(",\"pump_running\":");
+    out.print(_state.pumpRunning ? "true" : "false");
+    out.print(",\"pump_rpm\":");
+    printJsonNumber(out, _state.pumpRpm, 1);
+    out.print(",\"pump_full_speed\":");
+    out.print(_state.pumpFullSpeed ? "true" : "false");
+    out.print(",\"pump_readback_valid\":");
+    out.print(_state.pumpReadbackValid ? "true" : "false");
+}
+
+void CommandDispatcher::sendPumpResult(long id, const char* cmd, bool written, Print& out) const
+{
+    if (!written) {
+        sendError(id, cmd, "PUMP_WRITE_FAILED", out);
+        return;
+    }
+    out.print("{\"v\":2,\"id\":");
+    out.print(id);
+    out.print(",\"type\":\"OK\",\"cmd\":\"");
+    out.print(cmd);
+    out.print("\"");
+    printJsonPumpFields(out);
+    out.println("}");
 }
 
 void CommandDispatcher::sendError(long id, const char* cmd, const char* error, Print& out) const
 {
-    out.print("{\"id\":");
+    out.print("{\"v\":2,\"id\":");
     out.print(id);
     out.print(",\"type\":\"ERR\",\"cmd\":\"");
     out.print(cmd);
     out.print("\",\"error\":\"");
     out.print(error);
-    out.println("\"}");
+    out.print("\"");
+    if (strncmp(cmd, "PUMP_", 5) == 0 || strcmp(cmd, "STOP") == 0) printJsonPumpFields(out);
+    out.println("}");
 }

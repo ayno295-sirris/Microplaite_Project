@@ -18,6 +18,9 @@ private:
     char _line[SERIAL_COMMAND_MAX_LINE_LENGTH + 1] = {0};
     size_t _length = 0;
     bool _overflow = false;
+    bool _pendingCr = false;
+    bool _embeddedCr = false;
+    bool _containsNul = false;
 
     void handleChar(char c);
     void finishLine();

@@ -1,5 +1,7 @@
 #include "comm/SerialCommandService.h"
 
+#include <ctype.h>
+
 SerialCommandService::SerialCommandService(CommandDispatcher& dispatcher)
     : _dispatcher(dispatcher)
 {
@@ -25,6 +27,8 @@ void SerialCommandService::update()
 void SerialCommandService::handleChar(char c)
 {
     if (c == '\r') {
+        if (_pendingCr) _embeddedCr = true;
+        _pendingCr = true;
         return;
     }
 
@@ -32,6 +36,12 @@ void SerialCommandService::handleChar(char c)
         finishLine();
         return;
     }
+
+    if (_pendingCr) {
+        _embeddedCr = true;
+        _pendingCr = false;
+    }
+    if (c == '\0') _containsNul = true;
 
     if (_overflow) {
         return;
@@ -63,7 +73,13 @@ void SerialCommandService::finishLine()
     }
 
     if (_length > 0) {
-        _dispatcher.dispatch(_line, *_serial);
+        const char* start = _line;
+        while (*start && isspace(static_cast<unsigned char>(*start))) ++start;
+        if (*start == '{' && (_embeddedCr || _containsNul)) {
+            _dispatcher.sendMalformedJson(*_serial);
+        } else {
+            _dispatcher.dispatch(_line, *_serial);
+        }
     }
 
     resetLine();
@@ -73,5 +89,8 @@ void SerialCommandService::resetLine()
 {
     _length = 0;
     _overflow = false;
+    _pendingCr = false;
+    _embeddedCr = false;
+    _containsNul = false;
     _line[0] = '\0';
 }
