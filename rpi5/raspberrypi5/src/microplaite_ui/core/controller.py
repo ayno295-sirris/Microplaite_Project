@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 from microplaite_ui.config import (
@@ -18,13 +19,16 @@ from microplaite_ui.config import (
 from microplaite_ui.core.state import AppState
 from microplaite_ui.esp32.client import Esp32Client, Esp32ClientError
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
+from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 
 
 class AppController:
-    def __init__(self, client: Esp32Client) -> None:
+    def __init__(self, client: Esp32Client, status_logger: StatusCsvLogger | None = None) -> None:
         self.client = client
         self.state = AppState(port=getattr(client, "port", ""), connected=False)
         self.logs: deque[str] = deque(maxlen=50)
+        self._status_logger = status_logger or StatusCsvLogger()
+        self.logging_error = ""
         self._client_lock = threading.RLock()
         self._history_clock_start = time.monotonic()
 
@@ -185,7 +189,38 @@ class AppController:
         self._poll_pump_status()
         return self.state.last_message
 
+    def start_logging(self) -> Path | None:
+        try:
+            path = self._status_logger.start()
+        except OSError as exc:
+            self.logging_error = f"Logging unavailable: {exc}"
+            self.logs.append(self.logging_error)
+            return None
+        self.logging_error = ""
+        self.logs.append(f"Logging started: {path}")
+        return path
+
+    def stop_logging(self) -> None:
+        was_active = self._status_logger.active
+        try:
+            self._status_logger.stop()
+        except OSError as exc:
+            self.logging_error = f"Logging close failed: {exc}"
+            self.logs.append(self.logging_error)
+            return
+        if was_active:
+            self.logs.append("Logging stopped")
+
+    @property
+    def logging_active(self) -> bool:
+        return self._status_logger.active
+
+    @property
+    def logging_path(self) -> Path | None:
+        return self._status_logger.path
+
     def shutdown(self) -> None:
+        self.stop_logging()
         if self.state.connected and getattr(self.client, "supports_legacy_logging", True):
             try:
                 with self._client_lock:
@@ -259,6 +294,7 @@ class AppController:
             self._mark_connection_lost("V2 session LOST")
 
     def _mark_connection_lost(self, message: str) -> None:
+        self.stop_logging()
         self.state.connected = False
         if self._is_v2:
             self.state.session_state = str(getattr(self.client, "session_state", "LOST"))
@@ -290,6 +326,13 @@ class AppController:
             if time_ms is None:
                 time_ms = len(self.state.temp_history) * DEFAULT_LOG_PERIOD_MS
             self.state.temp_history.append((time_ms, self.state.temp_c))
+        if message.is_status and self._is_v2 and self.logging_active:
+            try:
+                self._status_logger.write_status(self.state)
+            except OSError as exc:
+                self.logging_error = f"Logging stopped after write failure: {exc}"
+                self.logs.append(self.logging_error)
+                self.stop_logging()
         self.state.last_message = message.error or message.raw or "OK"
         for line in message.lines or [self.state.last_message]:
             if line:

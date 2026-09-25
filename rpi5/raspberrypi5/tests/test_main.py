@@ -14,6 +14,7 @@ from microplaite_ui.core.state import AppState, TEMP_HISTORY_MAXLEN, derive_syst
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
 from microplaite_ui.services import timelapse as timelapse_module
+from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 from microplaite_ui.ui import main_window as main_window_module
 from microplaite_ui.ui.main_window import MainWindow
 
@@ -325,9 +326,10 @@ def test_state_history_receives_log_point_and_caps_to_1500() -> None:
     assert controller.state.temp_history[-1][1] == 34.0
 
 
-def test_layout_constants_fit_1280x720() -> None:
+def test_layout_constants_fit_1280x720(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication(sys.argv)
-    window = MainWindow(AppController(FakeEsp32Client()))
+    controller = AppController(FakeEsp32Client(), status_logger=StatusCsvLogger(tmp_path))
+    window = MainWindow(controller)
     window.timer.stop()
     window.show()
     app.processEvents()
@@ -384,13 +386,17 @@ def test_layout_constants_fit_1280x720() -> None:
     assert window.clear_button.y() == window.stop_button.y()
     assert window.logs_button.y() == window.stop_button.y()
     assert window.log_view.geometry().bottom() <= window.home_page.height()
+    assert window.logs_button.text() == "START LOGGING"
     window.logs_button.click()
     app.processEvents()
-    assert window.log_view.isVisible() is True
-    assert window.logs_button.text() == "HIDE LOGS"
+    assert controller.logging_active is True
+    assert window.log_view.isVisible() is False
+    assert window.logs_button.text() == "STOP LOGGING"
     assert window.log_view.geometry().bottom() <= window.home_page.height()
     window.logs_button.click()
     app.processEvents()
+    assert controller.logging_active is False
+    assert window.logs_button.text() == "START LOGGING"
     assert window.log_view.isVisible() is False
 
     window.setFixedSize(SCREEN_WIDTH, 640)

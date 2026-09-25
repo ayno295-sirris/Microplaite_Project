@@ -51,7 +51,12 @@ from microplaite_ui.config import (
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, derive_system_status
 from microplaite_ui.services.preferences import PreferencesStore, UserPreferences
-from microplaite_ui.services.storage import ensure_writable, resolve_storage_path, stamp, unique_path
+from microplaite_ui.services.storage import (
+    ensure_writable,
+    resolve_storage_path,
+    stamp,
+    unique_path,
+)
 from microplaite_ui.services.timelapse import TimelapseService, TimelapseSettings
 from microplaite_ui.ui.styles import QSS
 
@@ -433,10 +438,10 @@ class MainWindow(QMainWindow):
         actions.setSpacing(14)
         self.stop_button = self._button("STOP", "stopButtonCompact", 330, 52)
         self.clear_button = self._button("CLEAR ERROR", "secondaryButton", 260, 52)
-        self.logs_button = self._button("LOGS", "secondaryButton", 150, 52)
+        self.logs_button = self._button("START LOGGING", "secondaryButton", 180, 52)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_error)
-        self.logs_button.clicked.connect(self._toggle_logs)
+        self.logs_button.clicked.connect(self._toggle_logging)
         for button in (self.stop_button, self.clear_button, self.logs_button):
             actions.addWidget(button)
         actions.addStretch()
@@ -1779,10 +1784,11 @@ class MainWindow(QMainWindow):
         self.controller.poll_serial()
         self._render()
 
-    def _toggle_logs(self) -> None:
-        self._logs_visible = not self._logs_visible
-        self.log_view.setVisible(self._logs_visible)
-        self.logs_button.setText("HIDE LOGS" if self._logs_visible else "LOGS")
+    def _toggle_logging(self) -> None:
+        if self.controller.logging_active:
+            self.controller.stop_logging()
+        else:
+            self.controller.start_logging()
         self._render()
 
     def _nudge_target(self, delta: float) -> None:
@@ -2164,17 +2170,29 @@ class MainWindow(QMainWindow):
         self._set_dot(self.home_pump_dot, state.pump.readback is True and state.pump.running)
         self.home_pump_status.setText(pump_status)
         self.home_pump_rpm.setText(_rpm(state.pump.actual_rpm))
+        if self.controller.logging_active:
+            path = self.controller.logging_path
+            logging_status = f"Logging ON {path.name if path else ''}".rstrip()
+            self.logs_button.setText("STOP LOGGING")
+        elif self.controller.logging_error:
+            logging_status = self.controller.logging_error
+            self.logs_button.setText("START LOGGING")
+        else:
+            logging_status = "Logging OFF"
+            self.logs_button.setText("START LOGGING")
         self.bottom_status.setText(
             "Thermocouple {thermo}  |  Pump {pump}  |  Sensor {sensor}  |  "
-            "Fault {fault}  |  GPIO14 {gpio}  |  Last error {error}".format(
+            "Fault {fault}  |  GPIO14 {gpio}  |  Last error {error}  |  {logging}".format(
                 thermo=_flag(state.sensor_valid, "OK", "Invalid"),
                 pump=pump_status.lower(),
                 sensor=_flag(state.sensor_valid, "OK", "Invalid"),
                 fault=_flag(not state.fault if state.fault is not None else None, "OK", "Fault"),
                 gpio=_gpio(state.gpio14),
                 error=_error_text(state.last_error),
+                logging=logging_status,
             )
         )
+        self.logs_button.setToolTip(str(self.controller.logging_path or ""))
 
     def _render_temperature(self, state: AppState) -> None:
         self.temperature_temp_value.setText(_temp(state.temp_c))
