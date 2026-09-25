@@ -25,12 +25,13 @@ void printJsonNumber(Print& out, float value, int decimals)
 }
 }
 
-CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel)
+CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel, SupervisionService& supervision)
     : _state(state),
       _heater(heater),
       _temperature(temperature),
       _pump(pump),
-      _neopixel(neopixel)
+      _neopixel(neopixel),
+      _supervision(supervision)
 {
 }
 
@@ -73,7 +74,9 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
     }
 
     if (strcmp(cmd, "SYNC") == 0 || strcmp(cmd, "HEARTBEAT") == 0) {
-        sendError(id, cmd, "NOT_IMPLEMENTED", out);
+        error = strcmp(cmd, "SYNC") == 0 ? _supervision.sync(millis()) : _supervision.heartbeat(millis());
+        if (error) sendError(id, cmd, error, out);
+        else sendOk(id, cmd, out);
         return;
     }
 
@@ -137,7 +140,8 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
             return;
         }
         // Same fresh-temperature check and latch behavior as legacy PID_ON / CONTROL_ON.
-        error = checkTemperatureForHeating(true);
+        error = _supervision.activationError(millis());
+        if (!error) error = checkTemperatureForHeating(true);
         if (error) {
             syncHeaterState();
             sendError(id, cmd, error, out);
@@ -160,6 +164,7 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
     if (strcmp(cmd, "PUMP_START") == 0 || strcmp(cmd, "PUMP_SET_RPM") == 0) {
         float rpm = 0;
         error = JsonProtocol::number(request.get(), "rpm", 0, PUMP_MAX_RPM, rpm);
+        if (!error) error = _supervision.activationError(millis());
         if (error) {
             sendError(id, cmd, error, out);
             return;
@@ -176,6 +181,11 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
     }
 
     if (strcmp(cmd, "PUMP_PRIME") == 0) {
+        error = _supervision.activationError(millis());
+        if (error) {
+            sendError(id, cmd, error, out);
+            return;
+        }
         const bool written = _pump.prime(_state);
         sendPumpResult(id, cmd, written, out);
         return;
@@ -605,6 +615,15 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(safetyText());
     out.print("\",\"uptime_ms\":");
     out.print(millis());
+    out.print(",\"system_state\":\"");
+    out.print(_supervision.systemStateText());
+    out.print("\",\"comm_state\":\"");
+    out.print(_supervision.commStateText());
+    out.print("\",\"session_active\":");
+    out.print(_supervision.sessionActive() ? "true" : "false");
+    out.print(",\"heartbeat_age_ms\":");
+    if (_supervision.sessionActive()) out.print(_supervision.heartbeatAgeMs(millis()));
+    else out.print("null");
     out.println("}");
 }
 
@@ -741,8 +760,7 @@ void CommandDispatcher::sendTextMosfetOff(Print& out)
 
 void CommandDispatcher::sendTextStop(Print& out)
 {
-    _heater.stop();
-    _pump.stop(_state);
+    _supervision.stop();
     syncHeaterState();
     out.print("OK STOP HEATER_OFF");
     printPumpFields(out);
@@ -1086,8 +1104,7 @@ void CommandDispatcher::printNeoPixelFields(Print& out) const
 
 void CommandDispatcher::sendStop(long id, Print& out)
 {
-    _heater.stop();
-    const bool written = _pump.stop(_state);
+    const bool written = _supervision.stop();
     syncHeaterState();
 
     sendPumpResult(id, "STOP", written, out);

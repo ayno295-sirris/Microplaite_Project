@@ -6,11 +6,12 @@
 #include "app/AppState.h"
 #include "services/HeaterService.h"
 #include "services/PumpService.h"
+#include "services/SupervisionService.h"
 #include "services/TemperatureService.h"
 
 class CommandDispatcher {
 public:
-    CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel);
+    CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel, SupervisionService& supervision);
 
     void dispatch(const char* line, Print& out);
     void sendLineTooLong(Print& out);
@@ -22,6 +23,7 @@ private:
     TemperatureService& _temperature;
     PumpService& _pump;
     Adafruit_NeoPixel& _neopixel;
+    SupervisionService& _supervision;
 
     bool dispatchTextCommand(const char* line, Print& out);
     bool parseUint32Arg(const char* args, uint32_t& value) const;

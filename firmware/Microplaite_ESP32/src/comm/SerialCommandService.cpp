@@ -19,8 +19,12 @@ void SerialCommandService::update()
         return;
     }
 
-    while (_serial->available() > 0) {
-        handleChar(static_cast<char>(_serial->read()));
+    // Return to local safety/supervision between lines, even with continuous input.
+    size_t remaining = SERIAL_COMMAND_MAX_LINE_LENGTH + 2;
+    while (remaining-- > 0 && _serial->available() > 0) {
+        const char c = static_cast<char>(_serial->read());
+        handleChar(c);
+        if (c == '\n') return;
     }
 }
 

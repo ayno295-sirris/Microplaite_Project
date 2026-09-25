@@ -8,6 +8,7 @@
 #include "services/HeaterService.h"
 #include "services/PumpService.h"
 #include "services/SafetyService.h"
+#include "services/SupervisionService.h"
 #include "services/TemperatureService.h"
 
 class App {
@@ -24,6 +25,7 @@ private:
     PumpService _pump;
     TemperatureService _temperature;
     SafetyService _safety;
+    SupervisionService _supervision;
     CommandDispatcher _dispatcher;
     SerialCommandService _serialCommands;
     uint32_t _lastLogMs = 0;

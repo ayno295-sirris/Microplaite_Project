@@ -8,7 +8,13 @@ enum class SafetyLevel {
     ERROR
 };
 
+enum class SystemState { BOOT, IDLE, READY, RUNNING, FAULT };
+enum class CommState { NO_SESSION, ACTIVE, LOST };
+
 struct AppState {
+    SystemState systemState = SystemState::BOOT;
+    CommState commState = CommState::NO_SESSION;
+
     bool heaterEnabled = false;
     float heaterTargetC = 37.5f;
     float heaterOutputPercent = 0.0f;

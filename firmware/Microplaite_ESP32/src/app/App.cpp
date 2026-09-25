@@ -9,7 +9,8 @@
 App::App()
     : _neopixel(NEOPIXEL_COUNT, PIN_NEOPIXEL_DATA, NEO_GRBW + NEO_KHZ800),
       _heater(PIN_HEATER_PWM),
-      _dispatcher(_state, _heater, _temperature, _pump, _neopixel),
+      _supervision(_state, _heater, _pump),
+      _dispatcher(_state, _heater, _temperature, _pump, _neopixel, _supervision),
       _serialCommands(_dispatcher)
 {
 }
@@ -33,16 +34,20 @@ void App::begin()
     _safety.begin();
     _serialCommands.begin(Serial);
     updateState();
+    _supervision.begin(_state.temperatureAvailable);
 }
 
 void App::update()
 {
-    _serialCommands.update();
     _temperature.update();
     updateState();
     _safety.update(_state);
     _heater.update(_state.temperatureC, _state.temperatureValid, _state.safetyLevel);
     updateState();
+    _supervision.update(millis());
+    _serialCommands.update();
+    updateState();
+    _supervision.update(millis());
     writeLogIfDue();
 }
 
