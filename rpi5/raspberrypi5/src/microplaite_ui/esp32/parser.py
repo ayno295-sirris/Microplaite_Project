@@ -12,6 +12,7 @@ class ParsedMessage:
     ok: bool | None = None
     error: str | None = None
     is_log: bool = False
+    is_status: bool = False
     fields: dict[str, Any] = field(default_factory=dict)
     raw: str = ""
     lines: list[str] = field(default_factory=list)

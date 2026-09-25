@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from typing import Callable
 
@@ -25,12 +26,19 @@ class AppController:
         self.state = AppState(port=getattr(client, "port", ""), connected=False)
         self.logs: deque[str] = deque(maxlen=50)
         self._client_lock = threading.RLock()
+        self._history_clock_start = time.monotonic()
 
     def open_connection(self) -> AppState:
         open_session = getattr(self.client, "open_session", None)
         if callable(open_session):
             return self._call(open_session)
         return self.refresh_status()
+
+    def reconnect(self) -> AppState:
+        reconnect_session = getattr(self.client, "reconnect_session", None)
+        if not callable(reconnect_session):
+            return self.state
+        return self._call(reconnect_session)
 
     def refresh_status(self) -> AppState:
         if self._is_v2 and getattr(self.client, "session_state", "") != "READY":
@@ -270,7 +278,14 @@ class AppController:
             self.state.last_error = message.error
         elif self.state.last_error == "ESP32 not connected":
             self.state.last_error = ""
-        if message.is_log and self.state.temp_c is not None:
+        if message.is_status and message.fields.get("temperature_valid") is True:
+            temp_c = message.fields.get("temp_c")
+            if temp_c is not None:
+                time_ms = message.fields.get("uptime_ms")
+                if time_ms is None:
+                    time_ms = int((time.monotonic() - self._history_clock_start) * 1000)
+                self.state.temp_history.append((int(time_ms), float(temp_c)))
+        elif message.is_log and self.state.temp_c is not None:
             time_ms = self.state.time_ms
             if time_ms is None:
                 time_ms = len(self.state.temp_history) * DEFAULT_LOG_PERIOD_MS

@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         self._loading_preferences = False
         self._port_labels: list[QLabel] = []
         self._status_pills: list[QLabel] = []
+        self._reconnect_buttons: list[QPushButton] = []
         self._plot_curves: list[pg.PlotDataItem] = []
         self._target_lines: list[pg.InfiniteLine] = []
         self._logs_visible = False
@@ -1081,11 +1082,17 @@ class MainWindow(QMainWindow):
         status = QLabel("DISCONNECTED")
         status.setObjectName("statusPillIdle")
         status.setFixedSize(150, 40)
+        reconnect = self._button("RECONNECT", "secondaryButton", 150, 44)
+        reconnect.clicked.connect(self._reconnect)
         self._port_labels.append(port)
         self._status_pills.append(status)
+        self._reconnect_buttons.append(reconnect)
+        if not hasattr(self, "reconnect_button"):
+            self.reconnect_button = reconnect
         row.addWidget(title_label)
         row.addStretch()
         row.addWidget(port)
+        row.addWidget(reconnect)
         row.addWidget(status)
         return row
 
@@ -1105,14 +1112,18 @@ class MainWindow(QMainWindow):
         status = QLabel("DISCONNECTED")
         status.setObjectName("statusPillIdle")
         status.setFixedSize(150, 40)
+        reconnect = self._button("RECONNECT", "secondaryButton", 150, 54)
+        reconnect.clicked.connect(self._reconnect)
         stop = self._button("STOP", "stopButtonCompact", 158, 64)
         stop.clicked.connect(self._stop)
         self._port_labels.append(port)
         self._status_pills.append(status)
+        self._reconnect_buttons.append(reconnect)
         row.addWidget(back)
         row.addWidget(title_label)
         row.addStretch()
         row.addWidget(port)
+        row.addWidget(reconnect)
         row.addWidget(status)
         row.addWidget(stop)
         return bar
@@ -1760,6 +1771,10 @@ class MainWindow(QMainWindow):
         self.controller.refresh_status()
         self._render()
 
+    def _reconnect(self) -> None:
+        self.controller.reconnect()
+        self._render()
+
     def _poll_serial(self) -> None:
         self.controller.poll_serial()
         self._render()
@@ -2113,6 +2128,11 @@ class MainWindow(QMainWindow):
             widget.setEnabled(activation_allowed)
         self.stop_button.setEnabled(True)
         self.pump_stop_button.setEnabled(True)
+        is_v2 = bool(getattr(self.controller.client, "requires_active_session", False))
+        reconnect_enabled = status in {"LOST", "DISCONNECTED"}
+        for button in self._reconnect_buttons:
+            button.setVisible(is_v2)
+            button.setEnabled(is_v2 and reconnect_enabled)
         self.log_view.setPlainText("\n".join(self.controller.logs))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 

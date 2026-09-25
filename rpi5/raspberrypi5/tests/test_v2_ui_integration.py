@@ -27,11 +27,12 @@ class RecordingV2Client:
     def status(self) -> V2Status:
         self.calls.append(("status",))
         self.status_started.set()
+        status = self.status_value
         if self.block_status:
             assert self.release_status.wait(1.0)
         if self.status_error is not None:
             raise self.status_error
-        return self.status_value
+        return status
 
     def clear_error(self) -> V2Response:
         return self._record("clear_error")
@@ -84,9 +85,11 @@ class RecordingSession:
     def __init__(self, client: RecordingV2Client) -> None:
         self.client = client
         self.state = SessionState.DISCONNECTED
+        self.open_calls = 0
         self.stop_calls = 0
 
     def open(self) -> V2Status:
+        self.open_calls += 1
         self.state = SessionState.READY
         return self.client.status_value
 
@@ -103,6 +106,7 @@ class FailingSession(RecordingSession):
 
 def _status(**changes) -> V2Status:
     values = {
+        "uptime_ms": 1000,
         "temp_c": 24.5,
         "temperature_valid": True,
         "temperature_fault": 0,
@@ -350,3 +354,159 @@ def test_connection_failure_still_allows_ui_to_open_disconnected() -> None:
     assert controller.state.session_state == "LOST"
     assert window.start_button.isEnabled() is False
     assert window.stop_button.isEnabled() is True
+
+
+def test_v2_status_adds_valid_temperature_to_existing_history() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.temp_history.clear()
+    client.status_value = _status(uptime_ms=1250, temp_c=25.25, temperature_valid=True)
+
+    controller.refresh_status()
+
+    assert list(controller.state.temp_history) == [(1250, 25.25)]
+
+
+def test_v2_status_does_not_add_invalid_temperature_to_history() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.temp_history.clear()
+    client.status_value = _status(uptime_ms=1250, temp_c=25.25, temperature_valid=False)
+
+    controller.refresh_status()
+
+    assert list(controller.state.temp_history) == []
+
+
+def test_v2_temperature_history_uses_local_time_when_uptime_is_missing() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.temp_history.clear()
+    client.status_value = _status(uptime_ms=None, temp_c=25.25, temperature_valid=True)
+
+    controller.refresh_status()
+
+    [(time_ms, temp_c)] = controller.state.temp_history
+    assert time_ms >= 0
+    assert temp_c == 25.25
+
+
+def test_temperature_graph_receives_multiple_v2_status_points() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.temp_history.clear()
+    for uptime_ms, temp_c in ((1200, 25.0), (1400, 25.5), (1600, 26.0)):
+        client.status_value = _status(uptime_ms=uptime_ms, temp_c=temp_c)
+        controller.refresh_status()
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(controller)
+    window.timer.stop()
+    window._render()
+    app.processEvents()
+
+    xs, ys = window._plot_curves[0].getData()
+
+    assert list(xs) == pytest.approx([0.0, 0.2, 0.4])
+    assert list(ys) == pytest.approx([25.0, 25.5, 26.0])
+
+
+def test_stale_status_cannot_overwrite_newer_confirmed_pump_status() -> None:
+    controller, client, _ = _ready_controller()
+    adapter = controller.client
+    client.calls.clear()
+    client.status_started.clear()
+    client.block_status = True
+    client.status_value = _status(pump_running=False, pump_readback_valid=False)
+
+    controller.poll_serial()
+    assert client.status_started.wait(0.2)
+
+    command = threading.Thread(target=controller.start_pump)
+    command.start()
+    time.sleep(0.02)
+    client.release_status.set()
+    command.join(1.0)
+    assert not command.is_alive()
+    assert controller.state.pump_readback_valid is True
+
+    client.block_status = False
+    client.status_value = _status(pump_running=True, pump_readback_valid=True)
+    controller.poll_serial()
+
+    assert adapter.session_state == "READY"
+    assert controller.state.pump_readback_valid is True
+
+
+def test_newer_unconfirmed_status_is_not_hidden_after_pump_confirmation() -> None:
+    controller, client, _ = _ready_controller()
+    controller.start_pump()
+    assert controller.state.pump_readback_valid is True
+    client.status_value = _status(pump_running=True, pump_readback_valid=False)
+
+    controller.refresh_status()
+
+    assert controller.state.pump_running is True
+    assert controller.state.pump_readback_valid is False
+
+
+def test_lost_does_not_reconnect_until_operator_requests_it() -> None:
+    controller, _, session = _ready_controller()
+    session.state = SessionState.LOST
+
+    controller.poll_serial()
+    controller.poll_serial()
+    controller.poll_serial()
+
+    assert session.open_calls == 1
+    assert controller.state.session_state == "LOST"
+
+
+def test_reconnect_button_reopens_session_without_resuming_outputs() -> None:
+    controller, client, session = _ready_controller()
+    session.state = SessionState.LOST
+    controller.poll_serial()
+    controller.state.mode = "PID"
+    controller.state.pump_running = True
+    controller.state.neopixel_enabled = True
+    client.status_value = _status(
+        heater_mode="IDLE",
+        heater_output_percent=0.0,
+        heater_gpio_on=False,
+        pump_running=False,
+        pump_rpm=0.1,
+        pump_readback_valid=True,
+        neopixel_enabled=False,
+        system_state="READY",
+        comm_state="ACTIVE",
+    )
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(controller)
+    window.timer.stop()
+    window._render()
+    client.calls.clear()
+
+    assert window.reconnect_button.isEnabled() is True
+    window.reconnect_button.click()
+    app.processEvents()
+
+    assert session.stop_calls == 1
+    assert session.open_calls == 2
+    assert controller.state.connected is True
+    assert controller.state.session_state == "READY"
+    assert controller.state.mode == "IDLE"
+    assert controller.state.pump_running is False
+    assert controller.state.neopixel_enabled is False
+    assert not any(
+        call[0] in {"heater_enable", "pump_start", "pump_prime", "neopixel_set"}
+        for call in client.calls
+    )
+    assert window.reconnect_button.isEnabled() is False
+
+
+def test_stop_is_operational_again_after_manual_reconnect() -> None:
+    controller, client, session = _ready_controller()
+    session.state = SessionState.LOST
+    controller.poll_serial()
+    client.status_value = _status(system_state="READY", comm_state="ACTIVE")
+
+    controller.reconnect()
+    client.calls.clear()
+    controller.stop()
+
+    assert client.calls == [("stop",)]

@@ -11,6 +11,7 @@ from microplaite_ui.esp32.v2_client import V2Response, V2Status
 from microplaite_ui.esp32.v2_session import SessionState, V2Session
 
 _STATUS_FIELDS = (
+    "uptime_ms",
     "temp_c",
     "temperature_valid",
     "temperature_fault",
@@ -44,6 +45,7 @@ class V2UiClient(Esp32Client):
         self.session = session
         self.client = session.client
         self.port = str(getattr(getattr(self.client, "transport", None), "port", ""))
+        self._poll_command_lock = threading.Lock()
         self._poll_lock = threading.Lock()
         self._poll_thread: threading.Thread | None = None
         self._poll_message: ParsedMessage | None = None
@@ -60,6 +62,13 @@ class V2UiClient(Esp32Client):
             self._poll_message = None
             self._poll_error = None
         return self._run(lambda: self._status_message(self.session.open()))
+
+    def reconnect_session(self) -> ParsedMessage:
+        def reconnect() -> ParsedMessage:
+            self.close()
+            return self.open_session()
+
+        return self._run(reconnect)
 
     def status(self) -> ParsedMessage:
         return self._run(lambda: self._status_message(self.client.status()))
@@ -95,19 +104,19 @@ class V2UiClient(Esp32Client):
         return self._command(self.client.stop)
 
     def pump_start(self, rpm: float) -> ParsedMessage:
-        return self._command(lambda: self.client.pump_start(rpm))
+        return self._pump_command(lambda: self.client.pump_start(rpm))
 
     def pump_stop(self) -> ParsedMessage:
-        return self._command(self.client.pump_stop)
+        return self._pump_command(self.client.pump_stop)
 
     def pump_set_rpm(self, rpm: float) -> ParsedMessage:
-        return self._command(lambda: self.client.pump_set_rpm(rpm))
+        return self._pump_command(lambda: self.client.pump_set_rpm(rpm))
 
     def pump_prime(self) -> ParsedMessage:
-        return self._command(self.client.pump_prime)
+        return self._pump_command(self.client.pump_prime)
 
     def pump_status(self) -> ParsedMessage:
-        return self._command(self.client.pump_status)
+        return self._pump_command(self.client.pump_status)
 
     def neopixel_set(self, enabled: bool, brightness: int) -> ParsedMessage:
         return self._command(lambda: self.client.neopixel_set(enabled, brightness))
@@ -118,7 +127,7 @@ class V2UiClient(Esp32Client):
         if self.session.state is not SessionState.READY or self._closing:
             return []
 
-        with self._poll_lock:
+        with self._poll_command_lock, self._poll_lock:
             error = self._poll_error
             self._poll_error = None
             message = self._poll_message
@@ -158,6 +167,23 @@ class V2UiClient(Esp32Client):
     def _command(self, action: Callable[[], V2Response]) -> ParsedMessage:
         return self._run(lambda: self._response_message(action()))
 
+    def _pump_command(self, action: Callable[[], V2Response]) -> ParsedMessage:
+        with self._poll_command_lock:
+            self._finish_pending_status()
+            return self._command(action)
+
+    def _finish_pending_status(self) -> None:
+        with self._poll_lock:
+            thread = self._poll_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        with self._poll_lock:
+            error = self._poll_error
+            self._poll_error = None
+            self._poll_message = None
+        if error is not None:
+            raise Esp32ClientError(str(error)) from error
+
     @staticmethod
     def _run(action: Callable[[], ParsedMessage]) -> ParsedMessage:
         try:
@@ -174,7 +200,7 @@ class V2UiClient(Esp32Client):
             if getattr(status, name) is not None
         }
         fields["session_state"] = self.session_state
-        return ParsedMessage(ok=True, fields=fields, raw="V2 STATUS")
+        return ParsedMessage(ok=True, is_status=True, fields=fields, raw="V2 STATUS")
 
     def _response_message(self, response: V2Response) -> ParsedMessage:
         fields = {

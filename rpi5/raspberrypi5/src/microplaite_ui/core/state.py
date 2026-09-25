@@ -275,6 +275,14 @@ class AppState:
         self.thermal.time_ms = value
 
     @property
+    def uptime_ms(self) -> int | None:
+        return self.time_ms
+
+    @uptime_ms.setter
+    def uptime_ms(self, value: int | None) -> None:
+        self.time_ms = value
+
+    @property
     def last_error(self) -> str:
         return self.thermal.last_error
 
