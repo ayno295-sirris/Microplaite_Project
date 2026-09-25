@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -74,9 +75,21 @@ class SerialV2Transport:
         serial_port = self._require_open()
         previous_timeout = serial_port.timeout
         try:
-            serial_port.timeout = max(0.0, float(timeout_s))
-            line = serial_port.readline(self.max_line_bytes + 2)
-            return line or None
+            deadline = time.monotonic() + max(0.0, float(timeout_s))
+            line = bytearray()
+            # Bound every byte read; pyserial.readline() can restart its timeout per byte.
+            while len(line) < self.max_line_bytes + 2:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                serial_port.timeout = remaining
+                chunk = serial_port.read(1)
+                if not chunk or time.monotonic() >= deadline:
+                    return None
+                line.extend(chunk)
+                if chunk == b"\n":
+                    break
+            return bytes(line)
         except Exception as exc:
             self._close_after_error()
             raise V2TransportError(f"Serial read failed on {self.port}: {exc}") from exc

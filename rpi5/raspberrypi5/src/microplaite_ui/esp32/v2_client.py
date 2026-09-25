@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from microplaite_ui.esp32.v2_transport import V2Transport
+from microplaite_ui.esp32.v2_transport import V2Transport, V2TransportError
 
 PROTOCOL_VERSION = 2
 MAX_REQUEST_BYTES = 160
@@ -64,12 +64,12 @@ class V2Status:
     uptime_ms: int | None = None
     temp_c: float | None = None
     temperature_valid: bool | None = None
-    temperature_fault: bool | None = None
+    temperature_fault: int | None = None
     heater_mode: str | None = None
     heater_target_c: float | None = None
     heater_output_percent: float | None = None
     heater_gpio_on: bool | None = None
-    safety: Mapping[str, Any] | None = None
+    safety: str | None = None
     last_error: str | None = None
     error_latched: bool | None = None
     pump_running: bool | None = None
@@ -87,11 +87,14 @@ class V2Status:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> V2Status:
+        safety = _optional_string(payload, "safety")
+        if safety is not None and safety not in {"OK", "WARNING", "ERROR"}:
+            _invalid_field("safety", "OK, WARNING or ERROR")
         return cls(
             uptime_ms=_optional_int(payload, "uptime_ms", minimum=0),
             temp_c=_optional_number(payload, "temp_c"),
             temperature_valid=_optional_bool(payload, "temperature_valid"),
-            temperature_fault=_optional_bool(payload, "temperature_fault"),
+            temperature_fault=_optional_int(payload, "temperature_fault", minimum=0, maximum=255),
             heater_mode=_optional_string(payload, "heater_mode"),
             heater_target_c=_optional_number(payload, "heater_target_c"),
             heater_output_percent=_optional_number(
@@ -101,7 +104,7 @@ class V2Status:
                 maximum=100.0,
             ),
             heater_gpio_on=_optional_bool(payload, "heater_gpio_on"),
-            safety=_optional_mapping(payload, "safety"),
+            safety=safety,
             last_error=_optional_string(payload, "last_error"),
             error_latched=_optional_bool(payload, "error_latched"),
             pump_running=_optional_bool(payload, "pump_running"),
@@ -209,10 +212,10 @@ class V2Client:
         expected_type: str,
     ) -> V2Response:
         with self._request_lock:
+            if not self.transport.is_open:
+                raise V2TransportError("TRANSPORT_NOT_OPEN: call client.open() explicitly")
             request_id = self._take_request_id()
             encoded = self._serialize_request(request_id, command, fields)
-            if not self.transport.is_open:
-                self.transport.open()
             self.transport.write(encoded + b"\n")
             return self._read_correlated_response(request_id, expected_type)
 
@@ -261,7 +264,7 @@ class V2Client:
             if remaining <= 0:
                 raise V2TimeoutError(f"Timed out waiting for response id={request_id}")
             line = self.transport.read_line(remaining)
-            if line is None:
+            if line is None or self._clock() >= deadline:
                 raise V2TimeoutError(f"Timed out waiting for response id={request_id}")
             response = self._parse_candidate(line, request_id)
             if response is None:
@@ -323,7 +326,7 @@ class V2Client:
                 f"Response id={request_id} does not use protocol v={PROTOCOL_VERSION}",
             )
         response_type = payload.get("type")
-        if response_type not in {"OK", "ERR", "STATUS"}:
+        if not isinstance(response_type, str) or response_type not in {"OK", "ERR", "STATUS"}:
             raise V2ProtocolError(
                 ProtocolErrorKind.INVALID_RESPONSE_TYPE,
                 f"Response id={request_id} has invalid type {response_type!r}",
@@ -392,15 +395,6 @@ def _optional_string(payload: Mapping[str, Any], key: str) -> str | None:
     if not isinstance(value, str):
         _invalid_field(key, "a string")
     return value
-
-
-def _optional_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        _invalid_field(key, "an object")
-    return dict(value)
 
 
 def _invalid_field(key: str, expectation: str) -> None:
