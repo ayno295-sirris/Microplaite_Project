@@ -47,6 +47,16 @@ class MemoryTransport:
             b'{"v":2,"id":10,"cmd":"PING"}\n',
         ),
         (
+            b'{"v":2,"id":10,"type":"OK","cmd":"SYNC"}\n',
+            lambda client: client.sync(),
+            b'{"v":2,"id":10,"cmd":"SYNC"}\n',
+        ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"HEARTBEAT"}\n',
+            lambda client: client.heartbeat(),
+            b'{"v":2,"id":10,"cmd":"HEARTBEAT"}\n',
+        ),
+        (
             b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_START"}\n',
             lambda client: client.pump_start(3.0),
             b'{"v":2,"id":10,"cmd":"PUMP_START","rpm":3.0}\n',
@@ -221,6 +231,10 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
         "safety": "OK",
         "last_error": "NONE",
         "error_latched": False,
+        "system_state": "READY",
+        "comm_state": "ACTIVE",
+        "session_active": True,
+        "heartbeat_age_ms": 125,
         "pump_running": True,
         "pump_rpm": 3.0,
         "pump_full_speed": False,
@@ -246,6 +260,10 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
     assert status.safety == "OK"
     assert status.last_error == "NONE"
     assert status.error_latched is False
+    assert status.system_state == "READY"
+    assert status.comm_state == "ACTIVE"
+    assert status.session_active is True
+    assert status.heartbeat_age_ms == 125
     assert status.pump_running is True
     assert status.pump_rpm == 3.0
     assert status.pump_full_speed is False

@@ -72,6 +72,10 @@ class V2Status:
     safety: str | None = None
     last_error: str | None = None
     error_latched: bool | None = None
+    system_state: str | None = None
+    comm_state: str | None = None
+    session_active: bool | None = None
+    heartbeat_age_ms: int | None = None
     pump_running: bool | None = None
     pump_rpm: float | None = None
     pump_full_speed: bool | None = None
@@ -107,6 +111,10 @@ class V2Status:
             safety=safety,
             last_error=_optional_string(payload, "last_error"),
             error_latched=_optional_bool(payload, "error_latched"),
+            system_state=_optional_string(payload, "system_state"),
+            comm_state=_optional_string(payload, "comm_state"),
+            session_active=_optional_bool(payload, "session_active"),
+            heartbeat_age_ms=_optional_int(payload, "heartbeat_age_ms", minimum=0),
             pump_running=_optional_bool(payload, "pump_running"),
             pump_rpm=_optional_number(payload, "pump_rpm", minimum=0.0),
             pump_full_speed=_optional_bool(payload, "pump_full_speed"),
@@ -151,6 +159,12 @@ class V2Client:
 
     def ping(self) -> V2Response:
         return self.send_request("PING")
+
+    def sync(self) -> V2Response:
+        return self.send_request("SYNC")
+
+    def heartbeat(self) -> V2Response:
+        return self.send_request("HEARTBEAT")
 
     def status(self) -> V2Status:
         response = self._exchange("STATUS", {}, expected_type="STATUS")
