@@ -194,7 +194,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Microplaite Control")
         self.setFixedSize(SCREEN_WIDTH, SCREEN_HEIGHT)
         self.setStyleSheet(QSS)
-        self._refresh()
+        if getattr(self.controller.client, "requires_active_session", False):
+            self._render()
+        else:
+            self._refresh()
         if self.controller.state.connected:
             self.controller.start_live_updates()
         self._apply_preferences(self._preferences_store.load())
@@ -290,8 +293,10 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.home_setpoint)
         nudge = QHBoxLayout()
         nudge.setSpacing(10)
-        nudge.addWidget(self._setpoint_button("-", lambda: self._nudge_target(-0.1)))
-        nudge.addWidget(self._setpoint_button("+", lambda: self._nudge_target(0.1)))
+        self.home_target_minus_button = self._setpoint_button("-", lambda: self._nudge_target(-0.1))
+        self.home_target_plus_button = self._setpoint_button("+", lambda: self._nudge_target(0.1))
+        nudge.addWidget(self.home_target_minus_button)
+        nudge.addWidget(self.home_target_plus_button)
         nudge.addStretch()
         controls.addLayout(nudge)
         controls.addStretch()
@@ -537,8 +542,10 @@ class MainWindow(QMainWindow):
         setpoint_box.addWidget(self._caption("Setpoint"))
         setpoint_box.addWidget(self.thermal_setpoint_value)
         buttons = QHBoxLayout()
-        buttons.addWidget(self._small_button("-", lambda: self._nudge_target(-0.1)))
-        buttons.addWidget(self._small_button("+", lambda: self._nudge_target(0.1)))
+        self.thermal_target_minus_button = self._small_button("-", lambda: self._nudge_target(-0.1))
+        self.thermal_target_plus_button = self._small_button("+", lambda: self._nudge_target(0.1))
+        buttons.addWidget(self.thermal_target_minus_button)
+        buttons.addWidget(self.thermal_target_plus_button)
         buttons.addStretch()
         setpoint_box.addLayout(buttons)
         top.addWidget(setpoint_card)
@@ -678,13 +685,14 @@ class MainWindow(QMainWindow):
         rpm_control.addWidget(self.pump_plus_button)
         box.addLayout(rpm_control)
         controls = QHBoxLayout()
-        for text, name, handler in (
-            ("START PUMP", "primaryButton", self._start_pump),
-            ("STOP PUMP", "stopButtonSmall", self._stop_pump),
-            ("PRIME", "secondaryButton", self._prime_pump),
+        for attribute, text, name, handler in (
+            ("pump_start_button", "START PUMP", "primaryButton", self._start_pump),
+            ("pump_stop_button", "STOP PUMP", "stopButtonSmall", self._stop_pump),
+            ("pump_prime_button", "PRIME", "secondaryButton", self._prime_pump),
         ):
             button = self._button(text, name, 160, 58)
             button.clicked.connect(handler)
+            setattr(self, attribute, button)
             controls.addWidget(button)
         controls.addStretch()
         box.addLayout(controls)
@@ -2084,22 +2092,43 @@ class MainWindow(QMainWindow):
         self._render_timelapse()
         self._render_camera(state)
         self._render_plots(state)
+        activation_allowed = self.controller.activation_allowed
         for button in (self.start_button, self.temperature_start_button):
-            button.setEnabled(status not in {"DISCONNECTED", "ERROR"})
+            button.setEnabled(activation_allowed)
             button.setText("STOP PID" if state.mode == "PID" else "START")
+        for widget in (
+            self.home_target_minus_button,
+            self.home_target_plus_button,
+            self.temperature_target_minus_button,
+            self.temperature_target_plus_button,
+            self.thermal_target_minus_button,
+            self.thermal_target_plus_button,
+            self.pump_start_button,
+            self.pump_prime_button,
+            self.pump_slider,
+            self.pump_spin,
+            self.pump_minus_button,
+            self.pump_plus_button,
+        ):
+            widget.setEnabled(activation_allowed)
+        self.stop_button.setEnabled(True)
+        self.pump_stop_button.setEnabled(True)
         self.log_view.setPlainText("\n".join(self.controller.logs))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     def _render_header(self, state: AppState, status: str) -> None:
-        port_status = "connected" if state.connected else "disconnected"
+        port_status = state.comm_state or ("connected" if state.connected else "disconnected")
         for label in self._port_labels:
             label.setText(f"{state.port or '-'} {port_status}")
         for pill in self._status_pills:
             pill.setText(status)
             object_name = {
                 "RUNNING": "statusPillRunning",
+                "READY": "statusPillIdle",
                 "IDLE": "statusPillIdle",
                 "ERROR": "statusPillError",
+                "FAULT": "statusPillError",
+                "LOST": "statusPillDisconnected",
                 "DISCONNECTED": "statusPillDisconnected",
             }[status]
             self._set_object_name(pill, object_name)
@@ -2111,14 +2140,15 @@ class MainWindow(QMainWindow):
         self.home_heater_bar.setValue(round(state.heater_output_percent))
         self._set_dot(self.home_thermo_dot, bool(state.sensor_valid))
         self.home_thermo_label.setText(f"Thermocouple {_flag(state.sensor_valid, 'OK', 'Invalid')}")
-        self._set_dot(self.home_pump_dot, state.pump.running)
-        self.home_pump_status.setText("Running" if state.pump.running else "Stopped")
+        pump_status = _pump_status(state)
+        self._set_dot(self.home_pump_dot, state.pump.readback is True and state.pump.running)
+        self.home_pump_status.setText(pump_status)
         self.home_pump_rpm.setText(_rpm(state.pump.actual_rpm))
         self.bottom_status.setText(
             "Thermocouple {thermo}  |  Pump {pump}  |  Sensor {sensor}  |  "
             "Fault {fault}  |  GPIO14 {gpio}  |  Last error {error}".format(
                 thermo=_flag(state.sensor_valid, "OK", "Invalid"),
-                pump="running" if state.pump.running else "stopped",
+                pump=pump_status.lower(),
                 sensor=_flag(state.sensor_valid, "OK", "Invalid"),
                 fault=_flag(not state.fault if state.fault is not None else None, "OK", "Fault"),
                 gpio=_gpio(state.gpio14),
@@ -2174,8 +2204,9 @@ class MainWindow(QMainWindow):
         self.pid_value_labels["error"].setText(_error_text(state.last_error))
 
     def _render_pump(self, state: AppState) -> None:
-        self._set_dot(self.pump_dot, state.pump.running)
-        self.pump_status.setText("Running" if state.pump.running else "Stopped")
+        pump_status = _pump_status(state)
+        self._set_dot(self.pump_dot, state.pump.readback is True and state.pump.running)
+        self.pump_status.setText(pump_status)
         self.pump_actual_rpm.setText(_rpm(state.pump.actual_rpm))
         self.pump_target_rpm.setText(_rpm(state.pump.target_rpm))
         self.pump_slider.blockSignals(True)
@@ -2193,7 +2224,7 @@ class MainWindow(QMainWindow):
             "Readback: {readback}\n"
             "Tubing: not configured\n"
             "Flow rate: future calibration".format(
-                status="running" if state.pump.running else "stopped",
+                status=pump_status.lower(),
                 actual=_rpm_value(state.pump.actual_rpm),
                 target=_rpm_value(state.pump.target_rpm),
                 direction=state.pump.direction,
@@ -2264,14 +2295,15 @@ class MainWindow(QMainWindow):
         self.test_capture_button.setEnabled(
             not live_active and not snap.running and not snap.capture_in_progress and self._camera_mode == "idle"
         )
+        activation_allowed = self.controller.activation_allowed
+        self.test_neopixel_on_button.setEnabled(not snap.running and activation_allowed)
+        self.test_neopixel_off_button.setEnabled(not snap.running)
         for widget in (
-            self.test_neopixel_on_button,
-            self.test_neopixel_off_button,
             self.test_brightness_spin,
             self.test_brightness_minus_button,
             self.test_brightness_plus_button,
         ):
-            widget.setEnabled(not snap.running)
+            widget.setEnabled(not snap.running and activation_allowed)
         for widget in (
             self.test_record_video_check,
             self.test_video_storage_combo,
@@ -2396,6 +2428,12 @@ def _rpm_value(value: float) -> str:
 
 def _rpm(value: float) -> str:
     return f"{_rpm_value(value)} RPM"
+
+
+def _pump_status(state: AppState) -> str:
+    if state.pump.readback is not True:
+        return "Unconfirmed"
+    return "Running" if state.pump.running else "Stopped"
 
 
 def _percent(value: float | None) -> str:

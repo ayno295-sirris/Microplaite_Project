@@ -17,6 +17,7 @@ class ThermalState:
     mode: str = "IDLE"
     sensor_valid: bool | None = None
     fault: bool | None = None
+    temperature_fault: int | None = None
     gpio14: str | bool | None = None
     heater_output_percent: float = 0.0
     safety_limit: float | None = None
@@ -32,6 +33,8 @@ class ThermalState:
     timeout_remaining_s: int | None = None
     time_ms: int | None = None
     last_error: str = ""
+    safety: str | None = None
+    error_latched: bool | None = None
     temp_history: deque[tuple[int, float]] = field(
         default_factory=lambda: deque(maxlen=TEMP_HISTORY_MAXLEN)
     )
@@ -71,6 +74,11 @@ class AppState:
     port: str = ""
     connected: bool = False
     last_message: str = ""
+    system_state: str | None = None
+    comm_state: str | None = None
+    session_state: str = "DISCONNECTED"
+    session_active: bool | None = None
+    heartbeat_age_ms: int | None = None
 
     @property
     def temp_c(self) -> float | None:
@@ -105,6 +113,14 @@ class AppState:
         self.thermal.sensor_valid = value
 
     @property
+    def temperature_valid(self) -> bool | None:
+        return self.sensor_valid
+
+    @temperature_valid.setter
+    def temperature_valid(self, value: bool | None) -> None:
+        self.sensor_valid = value
+
+    @property
     def fault(self) -> bool | None:
         return self.thermal.fault
 
@@ -113,12 +129,46 @@ class AppState:
         self.thermal.fault = value
 
     @property
+    def temperature_fault(self) -> int | None:
+        return self.thermal.temperature_fault
+
+    @temperature_fault.setter
+    def temperature_fault(self, value: int | None) -> None:
+        self.thermal.temperature_fault = value
+        self.thermal.fault = None if value is None else value != 0
+
+    @property
     def gpio14(self) -> str | bool | None:
         return self.thermal.gpio14
 
     @gpio14.setter
     def gpio14(self, value: str | bool | None) -> None:
         self.thermal.gpio14 = value
+
+    @property
+    def heater_gpio_on(self) -> bool | None:
+        value = self.gpio14
+        return value if isinstance(value, bool) else None
+
+    @heater_gpio_on.setter
+    def heater_gpio_on(self, value: bool | None) -> None:
+        self.gpio14 = value
+
+    @property
+    def heater_mode(self) -> str:
+        return self.mode
+
+    @heater_mode.setter
+    def heater_mode(self, value: str) -> None:
+        self.mode = value
+
+    @property
+    def heater_target_c(self) -> float:
+        return self.target_c
+
+    @heater_target_c.setter
+    def heater_target_c(self, value: float) -> None:
+        self.target_c = value
 
     @property
     def heater_output_percent(self) -> float:
@@ -233,6 +283,22 @@ class AppState:
         self.thermal.last_error = value
 
     @property
+    def safety(self) -> str | None:
+        return self.thermal.safety
+
+    @safety.setter
+    def safety(self, value: str | None) -> None:
+        self.thermal.safety = value
+
+    @property
+    def error_latched(self) -> bool | None:
+        return self.thermal.error_latched
+
+    @error_latched.setter
+    def error_latched(self, value: bool | None) -> None:
+        self.thermal.error_latched = value
+
+    @property
     def temp_history(self) -> deque[tuple[int, float]]:
         return self.thermal.temp_history
 
@@ -273,6 +339,14 @@ class AppState:
         self.pump.readback = value
 
     @property
+    def pump_readback_valid(self) -> bool | None:
+        return self.pump_readback
+
+    @pump_readback_valid.setter
+    def pump_readback_valid(self, value: bool | None) -> None:
+        self.pump_readback = value
+
+    @property
     def neopixel_enabled(self) -> bool:
         return self.neopixel.enabled
 
@@ -290,12 +364,28 @@ class AppState:
         self.neopixel.supported = True
         self.neopixel.brightness_percent = max(0, min(100, int(round(float(value)))))
 
+    @property
+    def neopixel_brightness(self) -> int:
+        return self.neopixel_brightness_percent
+
+    @neopixel_brightness.setter
+    def neopixel_brightness(self, value: int | float) -> None:
+        self.neopixel_brightness_percent = value
+
 
 def derive_system_status(state: AppState) -> str:
+    if state.session_state == "LOST":
+        return "LOST"
     if not state.connected:
         return "DISCONNECTED"
-    if state.fault or state.mode == "ERROR" or (state.last_error and state.last_error.upper() != "NONE"):
+    if state.system_state == "FAULT":
+        return "FAULT"
+    if state.fault or state.error_latched or state.mode == "ERROR" or (
+        state.last_error and state.last_error.upper() != "NONE"
+    ):
         return "ERROR"
+    if state.system_state in {"READY", "RUNNING", "IDLE"}:
+        return state.system_state
     if state.mode == "PID" or state.heater_output_percent > 0:
         return "RUNNING"
     return "IDLE"
