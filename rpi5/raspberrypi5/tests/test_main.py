@@ -1,5 +1,7 @@
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,6 +16,8 @@ from microplaite_ui.core.state import AppState, TEMP_HISTORY_MAXLEN, derive_syst
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
 from microplaite_ui.services import timelapse as timelapse_module
+from microplaite_ui.services.recipe_runner import RecipeRunState
+from microplaite_ui.services.recipes import RecipeStore
 from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 from microplaite_ui.ui import main_window as main_window_module
 from microplaite_ui.ui.main_window import MainWindow
@@ -131,6 +135,43 @@ class RecordingClient:
 
     def close(self) -> None:
         self.commands.append("CLOSE")
+
+
+class ReadyRecipeClient(RecordingClient):
+    requires_active_session = True
+    supports_legacy_logging = False
+    session_state = "READY"
+
+
+def ready_recipe_controller(
+    *,
+    status_logger: StatusCsvLogger | None = None,
+) -> tuple[AppController, ReadyRecipeClient]:
+    client = ReadyRecipeClient()
+    controller = AppController(client, status_logger=status_logger)
+    controller.state.connected = True
+    controller.state.session_state = "READY"
+    controller.state.system_state = "READY"
+    controller.state.comm_state = "ACTIVE"
+    controller.state.safety = "OK"
+    controller.state.error_latched = False
+    return controller, client
+
+
+def write_recipe(path: Path, steps: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"name": "UI recipe", "steps": steps}),
+        encoding="utf-8",
+    )
+
+
+def wait_for_recipe(controller: AppController, state: RecipeRunState) -> None:
+    deadline = time.monotonic() + 1.0
+    while controller.recipe_progress.state is not state:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"recipe did not reach {state.value}")
+        time.sleep(0.005)
 
 
 def test_controller_starts_pid_with_fake_client() -> None:
@@ -406,6 +447,237 @@ def test_layout_constants_fit_1280x720(tmp_path: Path) -> None:
         camera_cards[0].geometry().bottom(),
     )
     assert window.log_view.isVisible() is False
+
+
+def test_recipes_page_discovers_files_and_reports_invalid_selection(tmp_path: Path) -> None:
+    good = tmp_path / "a-good.json"
+    good.write_text(
+        '{"name":"Good recipe","steps":[{"action":"WAIT","seconds":1}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "z-bad.json").write_text("{", encoding="utf-8")
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(
+        AppController(FakeEsp32Client()),
+        recipe_store=RecipeStore(tmp_path),
+    )
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+
+    assert window.recipes_button.isVisible()
+    assert window.recipes_button.geometry().right() <= window.home_page.width()
+    assert window.stop_button.isVisible()
+    assert window.logs_button.isVisible()
+    assert window.recipe_combo.count() == 3
+    assert [window.recipe_combo.itemText(index) for index in range(3)] == [
+        "a-good.json",
+        "test_simple.json",
+        "z-bad.json",
+    ]
+
+    window.recipes_button.click()
+    app.processEvents()
+    assert window.pages.currentIndex() == window.PAGE_RECIPES
+
+    window.recipe_combo.setCurrentText("a-good.json")
+    app.processEvents()
+    assert window.recipe_name_label.text() == "Good recipe"
+
+    window.recipe_combo.setCurrentText("z-bad.json")
+    app.processEvents()
+    assert window.recipe_state_label.text() == "Error"
+    assert window.recipe_start_button.isEnabled() is False
+
+
+def test_recipe_start_renders_progress_and_disables_manual_activation(
+    tmp_path: Path,
+) -> None:
+    write_recipe(
+        tmp_path / "a-running.json",
+        [
+            {"action": "WAIT", "seconds": 30},
+            {"action": "HEATER_OFF"},
+        ],
+    )
+    controller, client = ready_recipe_controller()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path))
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+    client.commands.clear()
+
+    window.recipe_start_button.click()
+    deadline = time.monotonic() + 0.2
+    while controller.recipe_progress.step_number != 1:
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not start first step")
+        time.sleep(0.005)
+    window._render()
+    app.processEvents()
+
+    assert window.recipe_state_label.text() == "Running"
+    assert window.recipe_progress_label.text() == "step 1 / 2"
+    assert window.recipe_step_label.text() == "WAIT"
+    assert window.recipe_start_button.isEnabled() is False
+    for control in (
+        window.start_button,
+        window.temperature_start_button,
+        window.pump_start_button,
+        window.pump_prime_button,
+        window.test_neopixel_on_button,
+        window.test_brightness_spin,
+    ):
+        assert control.isEnabled() is False
+    global_stops = [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.text() == "STOP"
+    ]
+    assert global_stops
+    assert all(button.isEnabled() for button in global_stops)
+
+    controller.cancel_recipe()
+
+
+def test_stop_recipe_skips_remaining_steps_and_renders_stopped(tmp_path: Path) -> None:
+    write_recipe(
+        tmp_path / "a-stop.json",
+        [
+            {"action": "WAIT", "seconds": 30},
+            {"action": "HEATER_OFF"},
+        ],
+    )
+    controller, client = ready_recipe_controller()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path))
+    window.timer.stop()
+    client.commands.clear()
+    window.recipe_start_button.click()
+    deadline = time.monotonic() + 0.2
+    while controller.recipe_progress.step_number != 1:
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not start first step")
+        time.sleep(0.005)
+
+    window.recipe_stop_button.click()
+    wait_for_recipe(controller, RecipeRunState.STOPPED)
+    deadline = time.monotonic() + 0.2
+    while "STOP" not in client.commands and time.monotonic() < deadline:
+        time.sleep(0.005)
+    window._render()
+
+    assert window.recipe_state_label.text() == "Stopped"
+    assert "STOP" in client.commands
+    assert "PID_OFF" not in client.commands
+
+
+def test_recipe_completion_timeout_and_terminal_errors_render(tmp_path: Path) -> None:
+    write_recipe(tmp_path / "a-complete.json", [{"action": "WAIT", "seconds": 0}])
+    controller, _ = ready_recipe_controller()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path))
+    window.timer.stop()
+
+    window.recipe_start_button.click()
+    wait_for_recipe(controller, RecipeRunState.COMPLETED)
+    window._render()
+    assert window.recipe_state_label.text() == "Completed"
+    assert window.recipe_progress_label.text() == "step 1 / 1"
+
+    write_recipe(
+        tmp_path / "a-timeout.json",
+        [
+            {
+                "action": "WAIT_TEMPERATURE",
+                "target_c": 44.3,
+                "tolerance_c": 0.3,
+                "timeout_s": 0.02,
+            }
+        ],
+    )
+    window.recipe_combo.insertItem(0, "a-timeout.json", tmp_path / "a-timeout.json")
+    window.recipe_combo.setCurrentIndex(0)
+    window.recipe_start_button.click()
+    wait_for_recipe(controller, RecipeRunState.ERROR)
+    window._render()
+
+    assert window.recipe_state_label.text() == "Error"
+    assert "temperature timeout" in window.recipe_error_label.text()
+
+
+def test_fault_and_lost_errors_stay_terminal_after_ready_render(tmp_path: Path) -> None:
+    write_recipe(tmp_path / "a-wait.json", [{"action": "WAIT", "seconds": 30}])
+    controller, _ = ready_recipe_controller()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path))
+    window.timer.stop()
+
+    for reason in ("ESP32 FAULT", "Connection LOST"):
+        window.recipe_start_button.click()
+        deadline = time.monotonic() + 0.2
+        while controller.recipe_progress.step_number != 1:
+            if time.monotonic() >= deadline:
+                raise AssertionError("recipe did not start")
+            time.sleep(0.005)
+        controller._recipe_runner.fail(reason, request_stop=False)
+        wait_for_recipe(controller, RecipeRunState.ERROR)
+        controller.state.connected = True
+        controller.state.session_state = "READY"
+        controller.state.system_state = "READY"
+        controller.state.comm_state = "ACTIVE"
+        window._render()
+
+        assert window.recipe_state_label.text() == "Error"
+        assert window.recipe_error_label.text() == reason
+        assert controller.recipe_progress.state is RecipeRunState.ERROR
+
+
+def test_recipe_does_not_change_existing_logging_lifecycle(tmp_path: Path) -> None:
+    recipe_dir = tmp_path / "recipes"
+    write_recipe(recipe_dir / "a-complete.json", [{"action": "WAIT", "seconds": 0}])
+    logger = StatusCsvLogger(tmp_path / "logs")
+    controller, _ = ready_recipe_controller(status_logger=logger)
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(recipe_dir))
+    window.timer.stop()
+    controller.start_logging()
+
+    window.recipe_start_button.click()
+    wait_for_recipe(controller, RecipeRunState.COMPLETED)
+    window._render()
+
+    assert controller.logging_active is True
+    controller.stop_logging()
+
+
+def test_global_stop_cancels_recipe_before_ui_cleanup_and_hardware_stop(
+    tmp_path: Path,
+) -> None:
+    write_recipe(tmp_path / "a-wait.json", [{"action": "WAIT", "seconds": 30}])
+    controller, _ = ready_recipe_controller()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path))
+    window.timer.stop()
+    window.recipe_start_button.click()
+    order: list[str] = []
+
+    controller.cancel_recipe = lambda reason="Stopped by operator": order.append("cancel")
+    window.timelapse_service.stop = lambda: order.append("timelapse")
+    window._stop_live_video = lambda: order.append("video")
+    controller.timelapse_neopixel_off = lambda: order.append("neopixel")
+    controller.stop = lambda: order.append("hardware_stop")
+
+    window._stop()
+
+    assert order == [
+        "cancel",
+        "timelapse",
+        "video",
+        "neopixel",
+        "hardware_stop",
+    ]
 
 
 def test_camera_format_selection_prefers_largest_four_three_mode() -> None:

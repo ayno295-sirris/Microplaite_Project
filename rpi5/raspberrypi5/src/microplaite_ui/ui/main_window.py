@@ -51,6 +51,12 @@ from microplaite_ui.config import (
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState, derive_system_status
 from microplaite_ui.services.preferences import PreferencesStore, UserPreferences
+from microplaite_ui.services.recipe_runner import RecipeExecutionError, RecipeRunState
+from microplaite_ui.services.recipes import (
+    RecipeDefinition,
+    RecipeStore,
+    RecipeValidationError,
+)
 from microplaite_ui.services.storage import (
     ensure_writable,
     resolve_storage_path,
@@ -153,11 +159,19 @@ class MainWindow(QMainWindow):
     PAGE_PUMP = 3
     PAGE_TIMELAPSE = 4
     PAGE_CAMERA = 5
+    PAGE_RECIPES = 6
 
-    def __init__(self, controller: AppController, preferences_store: PreferencesStore | None = None) -> None:
+    def __init__(
+        self,
+        controller: AppController,
+        preferences_store: PreferencesStore | None = None,
+        recipe_store: RecipeStore | None = None,
+    ) -> None:
         super().__init__()
         self.controller = controller
         self._preferences_store = preferences_store or PreferencesStore()
+        self._recipe_store = recipe_store or RecipeStore()
+        self._selected_recipe: RecipeDefinition | None = None
         self._loading_preferences = False
         self._port_labels: list[QLabel] = []
         self._status_pills: list[QLabel] = []
@@ -219,6 +233,7 @@ class MainWindow(QMainWindow):
         self.pump_page = self._build_pump_page()
         self.timelapse_page = self._build_timelapse_page()
         self.camera_page = self._build_camera_page()
+        self.recipes_page = self._build_recipes_page()
         for page in (
             self.home_page,
             self.temperature_page,
@@ -226,6 +241,7 @@ class MainWindow(QMainWindow):
             self.pump_page,
             self.timelapse_page,
             self.camera_page,
+            self.recipes_page,
         ):
             self.pages.addWidget(page)
         self.setCentralWidget(self.pages)
@@ -439,10 +455,17 @@ class MainWindow(QMainWindow):
         self.stop_button = self._button("STOP", "stopButtonCompact", 330, 52)
         self.clear_button = self._button("CLEAR ERROR", "secondaryButton", 260, 52)
         self.logs_button = self._button("START LOGGING", "secondaryButton", 180, 52)
+        self.recipes_button = self._button("RECIPES", "secondaryButton", 180, 52)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_error)
         self.logs_button.clicked.connect(self._toggle_logging)
-        for button in (self.stop_button, self.clear_button, self.logs_button):
+        self.recipes_button.clicked.connect(self.show_recipes_page)
+        for button in (
+            self.stop_button,
+            self.clear_button,
+            self.logs_button,
+            self.recipes_button,
+        ):
             actions.addWidget(button)
         actions.addStretch()
         return actions
@@ -515,6 +538,94 @@ class MainWindow(QMainWindow):
         layout.addWidget(graph_card, 1)
         layout.addStretch()
         return root
+
+    def _build_recipes_page(self) -> QWidget:
+        root, layout = self._page_root()
+        layout.addWidget(self._detail_header("Recipes"))
+
+        card = self._plain_card("card", width=900, height=430)
+        box = QVBoxLayout(card)
+        box.setContentsMargins(24, 20, 24, 20)
+        box.setSpacing(12)
+        box.addWidget(self._caption_large("Recipe selection"))
+
+        self.recipe_combo = QComboBox()
+        self.recipe_combo.setObjectName("touchCombo")
+        self.recipe_combo.setFixedHeight(48)
+        box.addWidget(self.recipe_combo)
+
+        self.recipe_name_label = QLabel("-")
+        self.recipe_name_label.setObjectName("mediumValue")
+        self.recipe_step_label = QLabel("-")
+        self.recipe_step_label.setObjectName("footerValue")
+        self.recipe_progress_label = QLabel("step 0 / 0")
+        self.recipe_progress_label.setObjectName("footerValue")
+        self.recipe_state_label = QLabel("Stopped")
+        self.recipe_state_label.setObjectName("footerValue")
+        self.recipe_error_label = QLabel("")
+        self.recipe_error_label.setObjectName("infoText")
+        self.recipe_error_label.setWordWrap(True)
+        for title, value in (
+            ("Name", self.recipe_name_label),
+            ("Current step", self.recipe_step_label),
+            ("Progress", self.recipe_progress_label),
+            ("State", self.recipe_state_label),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(self._small_text(title))
+            row.addWidget(value, 1)
+            box.addLayout(row)
+        box.addWidget(self.recipe_error_label)
+        box.addStretch()
+
+        controls = QHBoxLayout()
+        self.recipe_start_button = self._button(
+            "START RECIPE",
+            "primaryButton",
+            220,
+            56,
+        )
+        self.recipe_stop_button = self._button(
+            "STOP RECIPE",
+            "stopButtonSmall",
+            220,
+            56,
+        )
+        self.recipe_start_button.clicked.connect(self._start_recipe)
+        self.recipe_stop_button.clicked.connect(self._stop_recipe)
+        controls.addWidget(self.recipe_start_button)
+        controls.addWidget(self.recipe_stop_button)
+        controls.addStretch()
+        box.addLayout(controls)
+        layout.addWidget(card, 0, Qt.AlignHCenter)
+        layout.addStretch()
+
+        for path in self._recipe_store.list_files():
+            self.recipe_combo.addItem(path.name, path)
+        self.recipe_combo.currentIndexChanged.connect(self._select_recipe)
+        self._select_recipe(self.recipe_combo.currentIndex())
+        return root
+
+    def _select_recipe(self, index: int) -> None:
+        self._selected_recipe = None
+        if index < 0:
+            self.recipe_name_label.setText("-")
+            self.recipe_state_label.setText("Stopped")
+            self.recipe_error_label.clear()
+            return
+        path = self.recipe_combo.itemData(index)
+        try:
+            recipe = self._recipe_store.load(Path(path))
+        except (OSError, RecipeValidationError) as exc:
+            self.recipe_name_label.setText("-")
+            self.recipe_state_label.setText("Error")
+            self.recipe_error_label.setText(str(exc))
+            self.recipe_start_button.setEnabled(False)
+            return
+        self._selected_recipe = recipe
+        self.recipe_name_label.setText(recipe.name)
+        self.recipe_state_label.setText("Stopped")
+        self.recipe_error_label.clear()
 
     def _build_thermal_page(self) -> QWidget:
         root, layout = self._page_root()
@@ -1747,6 +1858,9 @@ class MainWindow(QMainWindow):
     def show_camera_page(self) -> None:
         self.pages.setCurrentIndex(self.PAGE_CAMERA)
 
+    def show_recipes_page(self) -> None:
+        self.pages.setCurrentIndex(self.PAGE_RECIPES)
+
     def _start_pid(self) -> None:
         self.controller.start_pid()
         if self.controller.state.connected:
@@ -1762,6 +1876,7 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _stop(self) -> None:
+        self.controller.cancel_recipe()
         self.timelapse_service.stop()
         self._stop_live_video()
         self.controller.timelapse_neopixel_off()
@@ -1789,6 +1904,20 @@ class MainWindow(QMainWindow):
             self.controller.stop_logging()
         else:
             self.controller.start_logging()
+        self._render()
+
+    def _start_recipe(self) -> None:
+        if self._selected_recipe is None:
+            return
+        try:
+            self.controller.start_recipe(self._selected_recipe)
+        except RecipeExecutionError as exc:
+            self.recipe_state_label.setText("Error")
+            self.recipe_error_label.setText(str(exc))
+        self._render()
+
+    def _stop_recipe(self) -> None:
+        self.controller.stop_recipe()
         self._render()
 
     def _nudge_target(self, delta: float) -> None:
@@ -2113,9 +2242,12 @@ class MainWindow(QMainWindow):
         self._render_timelapse()
         self._render_camera(state)
         self._render_plots(state)
+        self._render_recipe()
         activation_allowed = self.controller.activation_allowed
+        recipe_running = self.controller.recipe_progress.state is RecipeRunState.RUNNING
+        manual_activation_allowed = activation_allowed and not recipe_running
         for button in (self.start_button, self.temperature_start_button):
-            button.setEnabled(activation_allowed)
+            button.setEnabled(manual_activation_allowed)
             button.setText("STOP PID" if state.mode == "PID" else "START")
         for widget in (
             self.home_target_minus_button,
@@ -2131,9 +2263,16 @@ class MainWindow(QMainWindow):
             self.pump_minus_button,
             self.pump_plus_button,
         ):
-            widget.setEnabled(activation_allowed)
+            widget.setEnabled(manual_activation_allowed)
         self.stop_button.setEnabled(True)
         self.pump_stop_button.setEnabled(True)
+        self.test_neopixel_on_button.setEnabled(manual_activation_allowed)
+        for widget in (
+            self.test_brightness_spin,
+            self.test_brightness_minus_button,
+            self.test_brightness_plus_button,
+        ):
+            widget.setEnabled(manual_activation_allowed)
         is_v2 = bool(getattr(self.controller.client, "requires_active_session", False))
         reconnect_enabled = status in {"LOST", "DISCONNECTED"}
         for button in self._reconnect_buttons:
@@ -2141,6 +2280,26 @@ class MainWindow(QMainWindow):
             button.setEnabled(is_v2 and reconnect_enabled)
         self.log_view.setPlainText("\n".join(self.controller.logs))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+
+    def _render_recipe(self) -> None:
+        progress = self.controller.recipe_progress
+        if progress.recipe_name:
+            self.recipe_name_label.setText(progress.recipe_name)
+        self.recipe_step_label.setText(progress.current_step or "-")
+        self.recipe_progress_label.setText(
+            f"step {progress.step_number} / {progress.total_steps}"
+        )
+        if self._selected_recipe is not None or progress.recipe_name:
+            self.recipe_state_label.setText(progress.state.value)
+            self.recipe_error_label.setText(progress.error)
+        running = progress.state is RecipeRunState.RUNNING
+        self.recipe_combo.setEnabled(not running)
+        self.recipe_start_button.setEnabled(
+            self._selected_recipe is not None
+            and self.controller.activation_allowed
+            and not running
+        )
+        self.recipe_stop_button.setEnabled(running)
 
     def _render_header(self, state: AppState, status: str) -> None:
         port_status = state.comm_state or ("connected" if state.connected else "disconnected")

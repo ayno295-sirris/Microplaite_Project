@@ -133,6 +133,71 @@ def test_stop_sets_terminal_flag_before_global_stop_and_skips_next_step() -> Non
     assert calls == ["HEATER_PID_ON"]
 
 
+def test_stop_after_boundary_check_still_prevents_next_command() -> None:
+    calls: list[str] = []
+    boundary_checked = threading.Event()
+    release_boundary = threading.Event()
+    runner = RecipeRunner(
+        execute_command=lambda step: calls.append(step.action.value),
+        global_stop=lambda: None,
+    )
+    original_check = runner._finish_if_cancelled
+    check_count = 0
+
+    def gated_check() -> bool:
+        nonlocal check_count
+        result = original_check()
+        check_count += 1
+        if check_count == 3:
+            boundary_checked.set()
+            assert release_boundary.wait(1.0)
+        return result
+
+    runner._finish_if_cancelled = gated_check
+    runner.start(
+        recipe_with_steps(
+            RecipeStep(RecipeAction.HEATER_PID_ON),
+            RecipeStep(RecipeAction.PUMP_START, rpm=3.0),
+        )
+    )
+    assert boundary_checked.wait(0.2)
+
+    runner.stop(request_stop=False)
+    release_boundary.set()
+    runner.close()
+
+    assert calls == ["HEATER_PID_ON"]
+    assert runner.snapshot().state is RecipeRunState.STOPPED
+
+
+def test_lost_after_last_step_check_is_not_overwritten_by_completion() -> None:
+    last_check_done = threading.Event()
+    release_check = threading.Event()
+    runner = RecipeRunner(execute_command=lambda _step: None, global_stop=lambda: None)
+    original_check = runner._finish_if_cancelled
+    check_count = 0
+
+    def gated_check() -> bool:
+        nonlocal check_count
+        result = original_check()
+        check_count += 1
+        if check_count == 2:
+            last_check_done.set()
+            assert release_check.wait(1.0)
+        return result
+
+    runner._finish_if_cancelled = gated_check
+    runner.start(recipe_with_steps(RecipeStep(RecipeAction.HEATER_OFF)))
+    assert last_check_done.wait(0.2)
+
+    runner.fail("Connection LOST", request_stop=False)
+    release_check.set()
+    runner.close()
+
+    assert runner.snapshot().state is RecipeRunState.ERROR
+    assert runner.snapshot().error == "Connection LOST"
+
+
 def test_wait_runs_off_caller_thread_and_stop_wakes_it_promptly() -> None:
     runner = RecipeRunner(execute_command=lambda _step: None, global_stop=lambda: None)
     recipe = recipe_with_steps(RecipeStep(RecipeAction.WAIT, seconds=30.0))

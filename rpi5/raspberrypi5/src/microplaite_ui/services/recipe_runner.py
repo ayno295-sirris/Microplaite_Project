@@ -173,16 +173,21 @@ class RecipeRunner:
             if self._finish_if_cancelled():
                 return
             with self._condition:
-                self._progress = replace(
-                    self._progress,
-                    step_number=index,
-                    current_step=step.action.value,
-                )
-                wait_temperature_ready = (
-                    self._prepare_temperature_wait(step)
-                    if step.action is RecipeAction.WAIT_TEMPERATURE
-                    else True
-                )
+                cancelled_at_boundary = self._cancelled
+                if not cancelled_at_boundary:
+                    self._progress = replace(
+                        self._progress,
+                        step_number=index,
+                        current_step=step.action.value,
+                    )
+                    wait_temperature_ready = (
+                        self._prepare_temperature_wait(step)
+                        if step.action is RecipeAction.WAIT_TEMPERATURE
+                        else True
+                    )
+            if cancelled_at_boundary:
+                self._finish_if_cancelled()
+                return
             if step.action is RecipeAction.WAIT:
                 self._wait_duration(step.seconds or 0.0)
             elif step.action is RecipeAction.WAIT_TEMPERATURE:
@@ -197,11 +202,15 @@ class RecipeRunner:
             if self._finish_if_cancelled():
                 return
         with self._condition:
-            self._progress = replace(
-                self._progress,
-                state=RecipeRunState.COMPLETED,
-                current_step="",
-            )
+            cancelled_at_completion = self._cancelled
+            if not cancelled_at_completion:
+                self._progress = replace(
+                    self._progress,
+                    state=RecipeRunState.COMPLETED,
+                    current_step="",
+                )
+        if cancelled_at_completion:
+            self._finish_if_cancelled()
 
     def _wait_duration(self, seconds: float) -> None:
         deadline = self._monotonic() + seconds
