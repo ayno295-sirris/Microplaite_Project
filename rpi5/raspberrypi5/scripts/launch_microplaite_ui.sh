@@ -11,4 +11,25 @@ else
 fi
 
 export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+AUTOSTART_LAUNCH=0
+for argument in "$@"; do
+  if [[ "$argument" == "--autostart" ]]; then
+    AUTOSTART_LAUNCH=1
+    break
+  fi
+done
+
+if [[ "$AUTOSTART_LAUNCH" -eq 1 ]]; then
+  LOG_DIR="$HOME/MicroplaiteData/logs"
+  LOG_FILE="$LOG_DIR/autostart.log"
+  mkdir -p "$LOG_DIR"
+  {
+    printf '\n[%s] Starting Microplaite Control:' "$(date -Is)"
+    printf ' %q' "$@"
+    printf '\n'
+    exec "$PYTHON_BIN" "$APP_DIR/scripts/run_microplaite_ui.py" "$@"
+  } >>"$LOG_FILE" 2>&1
+fi
+
 exec "$PYTHON_BIN" "$APP_DIR/scripts/run_microplaite_ui.py" "$@"

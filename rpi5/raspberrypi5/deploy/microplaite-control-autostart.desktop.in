@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Microplaite Control
+Comment=Start the Microplaite Raspberry Pi interface
+Exec=@LAUNCHER@ --autostart --fullscreen
+Icon=applications-science
+Terminal=false
+StartupNotify=true
+X-GNOME-Autostart-enabled=true

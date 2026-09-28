@@ -75,7 +75,13 @@ python scripts\run_microplaite_ui.py --port COM10
 Raspberry Pi run. This auto-detects the ESP32 on `/dev/serial/by-id/*`, `/dev/ttyACM*`, or `/dev/ttyUSB*`, then falls back to `/dev/serial0`:
 
 ```bash
-python scripts/run_microplaite_ui.py
+scripts/launch_microplaite_ui.sh
+```
+
+Manual full-screen Raspberry Pi run:
+
+```bash
+scripts/launch_microplaite_ui.sh --fullscreen
 ```
 
 Manual Raspberry Pi port override:
@@ -92,6 +98,38 @@ python scripts/install_desktop_shortcut.py
 ```
 
 If the ESP32 is not connected, the UI shows the selected port as disconnected and `ESP32 not connected`. It does not switch to fake data.
+
+## Raspberry Pi graphical autostart
+
+The Raspberry Pi Desktop labwc session runs XDG autostart entries. Install the
+Microplaite entry for the current user with:
+
+```bash
+python scripts/install_autostart.py
+```
+
+This installs `~/.config/autostart/microplaite-control.desktop`. At the next
+graphical login it invokes the same production launcher with `--fullscreen`.
+The launcher resolves its own absolute project path, so it does not depend on
+the session's working directory.
+
+Autostart diagnostics are appended to
+`~/MicroplaiteData/logs/autostart.log`. If the ESP32 is unavailable during
+startup, the application remains open in `DISCONNECTED`; connect the ESP32 and
+use the UI's `RECONNECT` button. It does not retry or resume hardware actions
+automatically.
+
+The application uses a per-user lock. A second manual or automatic launch is
+refused without disturbing the running instance. Closing the UI does not
+restart it. To disable graphical autostart without removing logs or other
+application data, rename the entry:
+
+```bash
+mv ~/.config/autostart/microplaite-control.desktop \
+  ~/.config/autostart/microplaite-control.desktop.disabled
+```
+
+Run `python scripts/install_autostart.py` again to re-enable it.
 
 ## UART
 

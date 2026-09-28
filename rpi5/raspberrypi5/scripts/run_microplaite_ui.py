@@ -15,8 +15,18 @@ def main() -> int:
         default=default_serial_port(),
         help="Serial port, for example COM10, /dev/ttyUSB0, /dev/ttyACM0, or /dev/serial0.",
     )
+    parser.add_argument(
+        "--fullscreen",
+        action="store_true",
+        help="Open the application in full-screen mode.",
+    )
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Mark a launch started by the graphical-session autostart entry.",
+    )
     args = parser.parse_args()
-    return run_gui(port=args.port)
+    return run_gui(port=args.port, fullscreen=args.fullscreen)
 
 
 if __name__ == "__main__":
