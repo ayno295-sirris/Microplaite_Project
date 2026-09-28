@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.esp32.client import Esp32ClientError
+from microplaite_ui.esp32.fake_client import FakeEsp32Client
+from microplaite_ui.esp32.parser import ParsedMessage
 from microplaite_ui.esp32.v2_client import V2Response, V2Status
 from microplaite_ui.esp32.v2_session import SessionState
 from microplaite_ui.esp32.v2_ui_client import V2UiClient
 from microplaite_ui.main import create_v2_ui_client
+from microplaite_ui.services.recipe_runner import (
+    RecipeExecutionError,
+    RecipeRunState,
+    RecipeStatusSample,
+)
+from microplaite_ui.services.recipes import RecipeAction, RecipeDefinition, RecipeStep
 from microplaite_ui.ui.main_window import MainWindow
 
 
@@ -138,6 +147,372 @@ def _ready_controller() -> tuple[AppController, RecordingV2Client, RecordingSess
     controller = AppController(V2UiClient(session))
     controller.open_connection()
     return controller, client, session
+
+
+def _recipe(*steps: RecipeStep) -> RecipeDefinition:
+    return RecipeDefinition("Test recipe", tuple(steps), Path("test.json"))
+
+
+def _wait_recipe(controller: AppController, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while controller.recipe_progress.state is RecipeRunState.RUNNING:
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not reach a terminal state")
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [
+        (
+            RecipeStep(RecipeAction.SET_TEMPERATURE, target_c=44.3),
+            [("heater_set_target", 44.3)],
+        ),
+        (RecipeStep(RecipeAction.HEATER_OFF), [("heater_disable",)]),
+        (
+            RecipeStep(RecipeAction.PUMP_START, rpm=3.0),
+            [("pump_start", 3.0), ("pump_status",)],
+        ),
+        (
+            RecipeStep(RecipeAction.PUMP_SET_RPM, rpm=4.0),
+            [("pump_set_rpm", 4.0), ("pump_status",)],
+        ),
+        (
+            RecipeStep(RecipeAction.PUMP_STOP),
+            [("pump_stop",), ("pump_status",)],
+        ),
+        (
+            RecipeStep(RecipeAction.PUMP_PRIME),
+            [("pump_prime",), ("pump_status",)],
+        ),
+        (
+            RecipeStep(RecipeAction.NEOPIXEL, enabled=True, brightness=35),
+            [("neopixel_set", True, 35)],
+        ),
+    ],
+)
+def test_recipe_action_maps_to_existing_v2_command(
+    step: RecipeStep,
+    expected: list[tuple],
+) -> None:
+    controller, client, _ = _ready_controller()
+    client.calls.clear()
+    controller.state.pump.running = False
+
+    controller.start_recipe(_recipe(step))
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert client.calls == expected
+
+
+def test_recipe_pid_on_uses_existing_ordered_pid_start_sequence() -> None:
+    controller, client, _ = _ready_controller()
+    client.calls.clear()
+
+    controller.start_recipe(
+        _recipe(
+            RecipeStep(RecipeAction.SET_TEMPERATURE, target_c=44.3),
+            RecipeStep(RecipeAction.HEATER_PID_ON),
+        )
+    )
+    _wait_recipe(controller)
+
+    assert client.calls == [
+        ("heater_set_target", 44.3),
+        ("clear_error",),
+        ("heater_set_target", 44.3),
+        ("heater_set_pid", 8.0, 0.03, 20.0),
+        ("heater_set_pid_limit", 15.0),
+        ("heater_enable", "PID"),
+        ("status",),
+    ]
+
+
+def test_recipe_rejects_legacy_client_before_any_command() -> None:
+    client = FakeEsp32Client()
+    controller = AppController(client)
+    controller.refresh_status()
+
+    with pytest.raises(RecipeExecutionError, match="V2 session"):
+        controller.start_recipe(_recipe(RecipeStep(RecipeAction.HEATER_OFF)))
+
+    assert controller.recipe_progress.state is RecipeRunState.STOPPED
+
+
+def test_only_successful_v2_status_messages_publish_recipe_samples() -> None:
+    controller, _, _ = _ready_controller()
+    initial_sequence = controller._recipe_status_sequence
+    samples: list[RecipeStatusSample] = []
+    controller._recipe_runner.publish_status = samples.append
+
+    controller._apply(ParsedMessage(ok=True, raw="V2 PING"))
+    controller._apply(
+        ParsedMessage(
+            ok=False,
+            is_status=True,
+            raw="V2 STATUS ERROR",
+            fields={"temp_c": 44.0, "temperature_valid": True},
+        )
+    )
+    controller._apply(
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            raw="V2 STATUS",
+            fields={"temp_c": 44.1, "temperature_valid": True},
+        )
+    )
+
+    assert [sample.sequence for sample in samples] == [initial_sequence + 1]
+    assert samples[0].temp_c == 44.1
+    assert samples[0].temperature_valid is True
+
+
+def test_recipe_status_sample_never_reuses_stale_app_state_temperature() -> None:
+    controller, _, _ = _ready_controller()
+    initial_sequence = controller._recipe_status_sequence
+    controller.state.temp_c = 55.0
+    controller.state.temperature_valid = True
+    samples: list[RecipeStatusSample] = []
+    controller._recipe_runner.publish_status = samples.append
+
+    controller._apply(
+        ParsedMessage(ok=True, is_status=True, raw="V2 STATUS", fields={})
+    )
+    controller._apply(
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            raw="V2 STATUS",
+            fields={"temp_c": 44.0},
+        )
+    )
+
+    assert [sample.sequence for sample in samples] == [
+        initial_sequence + 1,
+        initial_sequence + 2,
+    ]
+    assert samples[0].temp_c is None
+    assert samples[0].temperature_valid is None
+    assert samples[1].temp_c == 44.0
+    assert samples[1].temperature_valid is None
+
+
+def test_legacy_log_does_not_publish_recipe_status_sample() -> None:
+    controller = AppController(FakeEsp32Client())
+    samples: list[RecipeStatusSample] = []
+    controller._recipe_runner.publish_status = samples.append
+
+    controller._apply(
+        ParsedMessage(
+            ok=True,
+            is_log=True,
+            raw="LOG,1000,44.3",
+            fields={"temp_c": 44.3, "temperature_valid": True},
+        )
+    )
+
+    assert samples == []
+
+
+def test_wait_temperature_ignores_pre_wait_status_and_accepts_next_status() -> None:
+    controller, _, _ = _ready_controller()
+    matching = ParsedMessage(
+        ok=True,
+        is_status=True,
+        raw="V2 STATUS",
+        fields={"temp_c": 44.3, "temperature_valid": True},
+    )
+    controller._apply(matching)
+
+    controller.start_recipe(
+        _recipe(
+            RecipeStep(
+                RecipeAction.WAIT_TEMPERATURE,
+                target_c=44.3,
+                tolerance_c=0.3,
+                timeout_s=1.0,
+            )
+        )
+    )
+    deadline = time.monotonic() + 0.2
+    while controller.recipe_progress.current_step != "WAIT_TEMPERATURE":
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not enter WAIT_TEMPERATURE")
+        time.sleep(0.005)
+    assert controller.recipe_progress.state is RecipeRunState.RUNNING
+
+    controller._apply(matching)
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+
+
+def test_stop_recipe_sets_stopped_before_sending_global_stop() -> None:
+    controller, client, _ = _ready_controller()
+    observed: list[RecipeRunState] = []
+    stop_called = threading.Event()
+    original_stop = client.stop
+
+    def observing_stop() -> V2Response:
+        observed.append(controller.recipe_progress.state)
+        stop_called.set()
+        return original_stop()
+
+    client.stop = observing_stop
+    client.calls.clear()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+
+    controller.stop_recipe()
+
+    assert stop_called.wait(0.2)
+    assert observed == [RecipeRunState.STOPPED]
+    assert client.calls == [("stop",)]
+
+
+def test_global_stop_cancels_recipe_before_sending_hardware_stop() -> None:
+    controller, client, _ = _ready_controller()
+    observed: list[RecipeRunState] = []
+    original_stop = client.stop
+
+    def observing_stop() -> V2Response:
+        observed.append(controller.recipe_progress.state)
+        return original_stop()
+
+    client.stop = observing_stop
+    client.calls.clear()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+
+    controller.stop()
+
+    assert observed == [RecipeRunState.STOPPED]
+    assert client.calls == [("stop",)]
+
+
+def test_connection_lost_interrupts_recipe_without_hardware_stop() -> None:
+    controller, client, session = _ready_controller()
+    client.calls.clear()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+
+    session.state = SessionState.LOST
+    controller.poll_serial()
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.ERROR
+    assert controller.recipe_progress.error == "Connection LOST"
+    assert ("stop",) not in client.calls
+
+
+def test_read_available_transport_error_interrupts_recipe_without_stop() -> None:
+    controller, client, _ = _ready_controller()
+    client.calls.clear()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+
+    def fail_read() -> list[ParsedMessage]:
+        raise Esp32ClientError("USB disappeared")
+
+    controller.client.read_available = fail_read
+    controller.poll_serial()
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.ERROR
+    assert ("stop",) not in client.calls
+
+
+@pytest.mark.parametrize(
+    "fault_fields",
+    [
+        {"system_state": "FAULT"},
+        {"safety": "ERROR"},
+        {"error_latched": True},
+    ],
+)
+def test_fault_status_interrupts_recipe_before_stop_and_skips_steps(
+    fault_fields: dict[str, object],
+) -> None:
+    controller, client, _ = _ready_controller()
+    stop_states: list[RecipeRunState] = []
+    stop_called = threading.Event()
+    original_stop = client.stop
+
+    def observing_stop() -> V2Response:
+        stop_states.append(controller.recipe_progress.state)
+        stop_called.set()
+        return original_stop()
+
+    client.stop = observing_stop
+    client.calls.clear()
+    controller.start_recipe(
+        _recipe(
+            RecipeStep(
+                RecipeAction.WAIT_TEMPERATURE,
+                target_c=44.3,
+                tolerance_c=0.3,
+                timeout_s=30.0,
+            ),
+            RecipeStep(RecipeAction.HEATER_OFF),
+        )
+    )
+    deadline = time.monotonic() + 0.2
+    while controller.recipe_progress.current_step != "WAIT_TEMPERATURE":
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not enter WAIT_TEMPERATURE")
+        time.sleep(0.005)
+
+    controller._apply(
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            raw="V2 STATUS",
+            fields={
+                "temp_c": 44.3,
+                "temperature_valid": True,
+                **fault_fields,
+            },
+        )
+    )
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.ERROR
+    assert stop_called.wait(0.2)
+    assert stop_states == [RecipeRunState.ERROR]
+    assert ("heater_disable",) not in client.calls
+
+
+def test_reconnect_does_not_resume_terminal_recipe() -> None:
+    controller, client, session = _ready_controller()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+    session.state = SessionState.LOST
+    controller.poll_serial()
+    _wait_recipe(controller)
+    client.status_value = _status(system_state="READY", comm_state="ACTIVE")
+    client.calls.clear()
+
+    controller.reconnect()
+    time.sleep(0.01)
+
+    assert controller.recipe_progress.state is RecipeRunState.ERROR
+    assert not any(call[0] in {"heater_enable", "pump_start"} for call in client.calls)
+
+
+def test_shutdown_stops_recipe_worker_before_closing_client_without_stop() -> None:
+    controller, client, _ = _ready_controller()
+    states_at_close: list[RecipeRunState] = []
+    original_close = controller.client.close
+
+    def observing_close() -> None:
+        states_at_close.append(controller.recipe_progress.state)
+        original_close()
+
+    controller.client.close = observing_close
+    client.calls.clear()
+    controller.start_recipe(_recipe(RecipeStep(RecipeAction.WAIT, seconds=30.0)))
+
+    controller.shutdown()
+
+    assert states_at_close == [RecipeRunState.STOPPED]
+    assert ("stop",) not in client.calls
 
 
 def test_v2_status_maps_all_ui_state_fields() -> None:

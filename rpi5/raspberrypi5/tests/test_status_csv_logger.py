@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import csv
 import os
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from microplaite_ui.core.controller import AppController
 from microplaite_ui.core.state import AppState
 from microplaite_ui.esp32.parser import ParsedMessage
+from microplaite_ui.services.recipe_runner import RecipeRunState
+from microplaite_ui.services.recipes import RecipeAction, RecipeDefinition, RecipeStep
 
 EXPECTED_COLUMNS = [
     "timestamp_iso",
@@ -255,3 +259,65 @@ def test_logs_button_controls_csv_logging_and_displays_active_file(tmp_path) -> 
     assert controller.logging_active is False
     assert window.logs_button.text() == "START LOGGING"
     assert "Logging OFF" in window.bottom_status.text()
+
+
+def test_recipe_wait_temperature_coexists_with_existing_status_csv_logging(
+    tmp_path,
+) -> None:
+    logger = _logger(tmp_path)
+    client = StatusStreamClient()
+    controller = AppController(client, status_logger=logger)
+    controller.state.connected = True
+    controller.state.session_state = "READY"
+    controller.state.system_state = "READY"
+    controller.state.comm_state = "ACTIVE"
+    controller.state.safety = "OK"
+    controller.state.error_latched = False
+    recipe = RecipeDefinition(
+        "Logged wait",
+        (
+            RecipeStep(
+                RecipeAction.WAIT_TEMPERATURE,
+                target_c=44.3,
+                tolerance_c=0.3,
+                timeout_s=2.0,
+            ),
+        ),
+        Path("logged-wait.json"),
+    )
+
+    path = controller.start_logging()
+    controller.start_recipe(recipe)
+    deadline = time.monotonic() + 0.2
+    while controller.recipe_progress.current_step != "WAIT_TEMPERATURE":
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not enter WAIT_TEMPERATURE")
+        time.sleep(0.005)
+    client.available = [
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            raw="V2 STATUS",
+            fields={"uptime_ms": 1000, "temp_c": 40.0, "temperature_valid": True},
+        ),
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            raw="V2 STATUS",
+            fields={"uptime_ms": 1200, "temp_c": 44.2, "temperature_valid": True},
+        ),
+    ]
+
+    controller.poll_serial()
+    deadline = time.monotonic() + 0.5
+    while controller.recipe_progress.state is RecipeRunState.RUNNING:
+        if time.monotonic() >= deadline:
+            raise AssertionError("recipe did not complete")
+        time.sleep(0.005)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert controller.logging_active is True
+    controller.stop_logging()
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert [row["esp32_uptime_ms"] for row in rows] == ["1000", "1200"]

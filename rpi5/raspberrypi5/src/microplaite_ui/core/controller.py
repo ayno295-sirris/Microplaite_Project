@@ -19,6 +19,13 @@ from microplaite_ui.config import (
 from microplaite_ui.core.state import AppState
 from microplaite_ui.esp32.client import Esp32Client, Esp32ClientError
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
+from microplaite_ui.services.recipe_runner import (
+    RecipeExecutionError,
+    RecipeProgress,
+    RecipeRunner,
+    RecipeStatusSample,
+)
+from microplaite_ui.services.recipes import RecipeAction, RecipeDefinition, RecipeStep
 from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 
 
@@ -31,6 +38,11 @@ class AppController:
         self.logging_error = ""
         self._client_lock = threading.RLock()
         self._history_clock_start = time.monotonic()
+        self._recipe_runner = RecipeRunner(
+            execute_command=self._execute_recipe_command,
+            global_stop=self._send_recipe_global_stop,
+        )
+        self._recipe_status_sequence = 0
 
     def open_connection(self) -> AppState:
         open_session = getattr(self.client, "open_session", None)
@@ -72,10 +84,7 @@ class AppController:
                     for message in self.client.read_available():
                         self._apply(message)
         except Esp32ClientError as exc:
-            self.state.connected = False
-            self.state.last_error = "ESP32 not connected"
-            self.state.last_message = str(exc)
-            self.logs.append(str(exc))
+            self._mark_connection_lost(str(exc))
         return self.state
 
     def start_pid(self) -> AppState:
@@ -99,7 +108,23 @@ class AppController:
         return self._call(self.client.pid_off)
 
     def stop(self) -> AppState:
+        self.cancel_recipe()
         return self._call(self.client.stop)
+
+    def start_recipe(self, recipe: RecipeDefinition) -> None:
+        if not self._is_v2 or not self.activation_allowed:
+            raise RecipeExecutionError("V2 session is not READY/ACTIVE")
+        self._recipe_runner.start(recipe)
+
+    def stop_recipe(self) -> None:
+        self._recipe_runner.stop(request_stop=True)
+
+    def cancel_recipe(self, reason: str = "Stopped by operator") -> None:
+        self._recipe_runner.stop(reason, request_stop=False)
+
+    @property
+    def recipe_progress(self) -> RecipeProgress:
+        return self._recipe_runner.snapshot()
 
     def clear_error(self) -> AppState:
         self._call(self.client.clear_error)
@@ -220,6 +245,7 @@ class AppController:
         return self._status_logger.path
 
     def shutdown(self) -> None:
+        self._recipe_runner.close()
         self.stop_logging()
         if self.state.connected and getattr(self.client, "supports_legacy_logging", True):
             try:
@@ -267,6 +293,62 @@ class AppController:
         if self.state.connected:
             self._call(self.client.pump_status)
 
+    def _execute_recipe_command(self, step: RecipeStep) -> None:
+        if step.action is RecipeAction.SET_TEMPERATURE:
+            if step.target_c is None:
+                raise RecipeExecutionError("SET_TEMPERATURE requires target_c")
+            self.set_target_from_ui(step.target_c)
+        elif step.action is RecipeAction.HEATER_PID_ON:
+            self.start_pid()
+        elif step.action is RecipeAction.HEATER_OFF:
+            self.stop_pid()
+        elif step.action is RecipeAction.PUMP_START:
+            if step.rpm is None:
+                raise RecipeExecutionError("PUMP_START requires rpm")
+            self.state.pump.target_rpm = step.rpm
+            self.start_pump()
+        elif step.action is RecipeAction.PUMP_SET_RPM:
+            if step.rpm is None:
+                raise RecipeExecutionError("PUMP_SET_RPM requires rpm")
+            self.state.pump.target_rpm = step.rpm
+            self.state.pump.readback = None
+            self._call(lambda: self.client.pump_set_rpm(step.rpm))
+            self._poll_pump_status()
+        elif step.action is RecipeAction.PUMP_STOP:
+            self.stop_pump()
+        elif step.action is RecipeAction.PUMP_PRIME:
+            self.prime_pump()
+        elif step.action is RecipeAction.NEOPIXEL:
+            if step.enabled is None or step.brightness is None:
+                raise RecipeExecutionError("NEOPIXEL requires enabled and brightness")
+            self.state.neopixel.enabled = step.enabled
+            self.state.neopixel.brightness_percent = step.brightness
+            self._call(lambda: self.client.neopixel_set(step.enabled, step.brightness))
+        else:
+            raise RecipeExecutionError(f"unsupported recipe action: {step.action.value}")
+        self._check_recipe_command_result()
+
+    def _check_recipe_command_result(self) -> None:
+        if (
+            not self.state.connected
+            or self.state.session_state != "READY"
+            or self.state.comm_state != "ACTIVE"
+        ):
+            self._recipe_runner.fail("Connection LOST", request_stop=False)
+            return
+        if (
+            self.state.system_state == "FAULT"
+            or self.state.safety == "ERROR"
+            or self.state.error_latched is True
+        ):
+            self._recipe_runner.fail("ESP32 FAULT", request_stop=True)
+            return
+        if self.state.last_error:
+            raise RecipeExecutionError(self.state.last_error)
+
+    def _send_recipe_global_stop(self) -> None:
+        self._call(self.client.stop)
+
     def _call(self, action: Callable[[], ParsedMessage]) -> AppState:
         try:
             with self._client_lock:
@@ -294,6 +376,7 @@ class AppController:
             self._mark_connection_lost("V2 session LOST")
 
     def _mark_connection_lost(self, message: str) -> None:
+        self._recipe_runner.fail("Connection LOST", request_stop=False)
         self.stop_logging()
         self.state.connected = False
         if self._is_v2:
@@ -310,6 +393,21 @@ class AppController:
                 if key == "last_error" and isinstance(value, str) and value.upper() == "NONE":
                     value = ""
                 setattr(self.state, key, value)
+        if message.is_status and message.ok is True and self._is_v2:
+            self._recipe_status_sequence += 1
+            sample = RecipeStatusSample(
+                sequence=self._recipe_status_sequence,
+                received_monotonic=time.monotonic(),
+                temperature_valid=message.fields.get("temperature_valid"),
+                temp_c=message.fields.get("temp_c"),
+            )
+            if (
+                self.state.system_state == "FAULT"
+                or self.state.safety == "ERROR"
+                or self.state.error_latched is True
+            ):
+                self._recipe_runner.fail("ESP32 FAULT", request_stop=True)
+            self._recipe_runner.publish_status(sample)
         if message.error:
             self.state.last_error = message.error
         elif self.state.last_error == "ESP32 not connected":
