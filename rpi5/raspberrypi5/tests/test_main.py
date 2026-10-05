@@ -6,21 +6,207 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QLabel, QFrame, QPushButton
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+from PySide6.QtGui import QImage, QMouseEvent
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from microplaite_ui.config import DEFAULT_TARGET_C, SCREEN_HEIGHT, SCREEN_WIDTH
 from microplaite_ui.core.controller import AppController
-from microplaite_ui.core.state import AppState, TEMP_HISTORY_MAXLEN, derive_system_status
+from microplaite_ui.core.state import (
+    TEMP_HISTORY_MAXLEN,
+    AppState,
+    derive_system_status,
+)
+from microplaite_ui.esp32.client import Esp32ClientError
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
 from microplaite_ui.services import timelapse as timelapse_module
 from microplaite_ui.services.recipe_runner import RecipeRunState
-from microplaite_ui.services.recipes import RecipeStore
+from microplaite_ui.services.recipes import (
+    RecipeAction,
+    RecipeDefinition,
+    RecipeStep,
+    RecipeStore,
+)
 from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 from microplaite_ui.ui import main_window as main_window_module
 from microplaite_ui.ui.main_window import MainWindow
+
+
+def test_maintenance_title_short_click_does_nothing() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    _send_mouse_event(title, QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+    _send_mouse_event(title, QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+    _process_events_for(app, 0.04)
+
+    assert emissions == []
+
+
+def test_maintenance_title_long_press_emits_once() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    _send_mouse_event(title, QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+    _process_events_for(app, 0.04)
+    _send_mouse_event(title, QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+
+    assert emissions == [True]
+
+
+def test_main_title_long_press_opens_maintenance_dialog() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show()
+    window.maintenance_title_label._hold_timer.setInterval(25)
+
+    _send_mouse_event(
+        window.maintenance_title_label,
+        QEvent.Type.MouseButtonPress,
+        Qt.MouseButton.LeftButton,
+    )
+    _process_events_for(app, 0.04)
+    _send_mouse_event(
+        window.maintenance_title_label,
+        QEvent.Type.MouseButtonRelease,
+        Qt.MouseButton.NoButton,
+    )
+
+    assert window._maintenance_dialog is not None
+    assert window._maintenance_dialog.isVisible() is True
+    assert window._maintenance_dialog.windowTitle() == "Maintenance"
+    window._maintenance_dialog.reject()
+    window.close()
+
+
+def test_maintenance_display_button_toggles_fullscreen_and_windowed() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.showFullScreen()
+    app.processEvents()
+
+    window._show_maintenance_dialog()
+    assert window.maintenance_display_button.text() == "EXIT FULLSCREEN"
+    window.maintenance_display_button.click()
+    app.processEvents()
+
+    assert window.isFullScreen() is False
+    assert window._maintenance_dialog is None
+
+    window._show_maintenance_dialog()
+    assert window.maintenance_display_button.text() == "ENTER FULLSCREEN"
+    window.maintenance_display_button.click()
+    app.processEvents()
+
+    assert window.isFullScreen() is True
+    assert window._maintenance_dialog is None
+    window.close()
+
+
+def test_maintenance_cancel_closes_only_dialog() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+
+    window._show_maintenance_dialog()
+    dialog = window._maintenance_dialog
+    window.maintenance_cancel_button.click()
+    app.processEvents()
+
+    assert dialog is not None
+    assert dialog.isVisible() is False
+    assert window.isVisible() is True
+    window.close()
+
+
+def test_maintenance_quit_ready_stops_recipe_hardware_logging_and_client(
+    tmp_path: Path,
+) -> None:
+    logger = StatusCsvLogger(tmp_path)
+    controller, client = ready_recipe_controller(status_logger=logger)
+    controller.start_logging()
+    controller.start_recipe(
+        RecipeDefinition(
+            name="Quit test",
+            steps=(RecipeStep(RecipeAction.WAIT, seconds=30.0),),
+            source=Path("quit-test.json"),
+        )
+    )
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path / "recipes"))
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+    client.commands.clear()
+
+    window._show_maintenance_dialog()
+    window.maintenance_quit_button.click()
+    app.processEvents()
+
+    assert controller.recipe_progress.state is RecipeRunState.STOPPED
+    assert controller.logging_active is False
+    assert client.commands.index("STOP") < client.commands.index("CLOSE")
+    assert window.isVisible() is False
+    assert window.timer.isActive() is False
+
+
+def test_maintenance_quit_lost_closes_despite_transport_errors(tmp_path: Path) -> None:
+    client = LostClosingClient()
+    controller = AppController(client, status_logger=StatusCsvLogger(tmp_path))
+    controller.state.connected = False
+    controller.state.session_state = "LOST"
+    controller.state.comm_state = "LOST"
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(controller, recipe_store=RecipeStore(tmp_path / "recipes"))
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+
+    window._show_maintenance_dialog()
+    window.maintenance_quit_button.click()
+    app.processEvents()
+
+    assert "STOP" not in client.commands
+    assert "CLOSE_ATTEMPT" in client.commands
+    assert window.isVisible() is False
+    assert window.timer.isActive() is False
+
+
+def _send_mouse_event(
+    widget: QLabel,
+    event_type: QEvent.Type,
+    buttons: Qt.MouseButton,
+) -> None:
+    event = QMouseEvent(
+        event_type,
+        QPointF(1.0, 1.0),
+        QPointF(1.0, 1.0),
+        QPointF(1.0, 1.0),
+        Qt.MouseButton.LeftButton,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, event)
+
+
+def _process_events_for(app: QApplication, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.002)
 
 
 class RecordingClient:
@@ -141,6 +327,20 @@ class ReadyRecipeClient(RecordingClient):
     requires_active_session = True
     supports_legacy_logging = False
     session_state = "READY"
+
+
+class LostClosingClient(ReadyRecipeClient):
+    session_state = "LOST"
+
+    def stop(self) -> ParsedMessage:
+        raise AssertionError("STOP must not be attempted while LOST")
+
+    def neopixel_off(self) -> ParsedMessage:
+        raise Esp32ClientError("transport lost")
+
+    def close(self) -> None:
+        self.commands.append("CLOSE_ATTEMPT")
+        raise Esp32ClientError("transport already closed")
 
 
 def ready_recipe_controller(

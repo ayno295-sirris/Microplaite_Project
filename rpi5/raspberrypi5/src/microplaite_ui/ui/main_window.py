@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -74,6 +75,31 @@ class ClickableCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+
+class MaintenanceTitleLabel(QLabel):
+    maintenance_requested = Signal()
+    HOLD_DURATION_MS = 3000
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(self.HOLD_DURATION_MS)
+        self._hold_timer.timeout.connect(self.maintenance_requested.emit)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._hold_timer.stop()
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hold_timer.stop()
+        super().leaveEvent(event)
 
 
 class ZoomableCameraView(QLabel):
@@ -201,6 +227,8 @@ class MainWindow(QMainWindow):
         self._last_video_path = ""
         self._camera_image_lock = threading.Lock()
         self._timelapse_notice = ""
+        self._maintenance_dialog: QDialog | None = None
+        self._close_cleanup_done = False
         self.timelapse_service = TimelapseService(
             capture_image=self._save_camera_image,
             neopixel_on=self.controller.timelapse_neopixel_on,
@@ -1191,8 +1219,10 @@ class MainWindow(QMainWindow):
 
     def _header(self, title: str) -> QHBoxLayout:
         row = QHBoxLayout()
-        title_label = QLabel(title)
+        title_label = MaintenanceTitleLabel(title)
         title_label.setObjectName("pageTitle")
+        title_label.maintenance_requested.connect(self._show_maintenance_dialog)
+        self.maintenance_title_label = title_label
         port = QLabel()
         port.setObjectName("portLabel")
         status = QLabel("DISCONNECTED")
@@ -1211,6 +1241,96 @@ class MainWindow(QMainWindow):
         row.addWidget(reconnect)
         row.addWidget(status)
         return row
+
+    def _show_maintenance_dialog(self) -> None:
+        if self._maintenance_dialog is not None:
+            self._maintenance_dialog.raise_()
+            self._maintenance_dialog.activateWindow()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Maintenance")
+        dialog.setModal(True)
+        dialog.setFixedSize(500, 330)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(42, 30, 42, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("MAINTENANCE")
+        title.setObjectName("pageTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        display_text = "EXIT FULLSCREEN" if self.isFullScreen() else "ENTER FULLSCREEN"
+        self.maintenance_display_button = self._button(
+            display_text,
+            "secondaryButton",
+            360,
+            60,
+        )
+        self.maintenance_quit_button = self._button(
+            "QUIT APPLICATION",
+            "stopButtonSmall",
+            360,
+            60,
+        )
+        self.maintenance_cancel_button = self._button(
+            "CANCEL",
+            "secondaryButton",
+            360,
+            60,
+        )
+        self.maintenance_display_button.clicked.connect(self._toggle_window_mode)
+        self.maintenance_quit_button.clicked.connect(self._quit_application)
+        self.maintenance_cancel_button.clicked.connect(dialog.reject)
+
+        layout.addWidget(self.maintenance_display_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.maintenance_quit_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.maintenance_cancel_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._maintenance_dialog = dialog
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._maintenance_dialog_finished(current)
+        )
+        dialog.open()
+
+    def _maintenance_dialog_finished(self, dialog: QDialog) -> None:
+        if self._maintenance_dialog is dialog:
+            self._maintenance_dialog = None
+
+    def _toggle_window_mode(self) -> None:
+        dialog = self._maintenance_dialog
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        if dialog is not None:
+            dialog.accept()
+
+    def _quit_application(self) -> None:
+        dialog = self._maintenance_dialog
+        if dialog is not None:
+            dialog.accept()
+        self.setEnabled(False)
+        self.timer.stop()
+        self._run_close_action(
+            "Recipe cancellation",
+            lambda: self.controller.cancel_recipe("Application closing"),
+        )
+        requires_session = bool(
+            getattr(self.controller.client, "requires_active_session", False)
+        )
+        session_ready = self.controller.state.session_state == "READY"
+        if self.controller.state.connected and (not requires_session or session_ready):
+            self._run_close_action("Global STOP", self.controller.stop)
+        self.close()
+
+    def _run_close_action(self, label: str, action) -> None:
+        try:
+            action()
+        except Exception as exc:  # noqa: BLE001 - closing must always continue
+            self.controller.logs.append(f"{label} failed during close: {exc}")
 
     def _detail_header(self, title: str) -> QWidget:
         bar = QWidget()
@@ -2607,11 +2727,17 @@ class MainWindow(QMainWindow):
         widget.style().polish(widget)
 
     def closeEvent(self, event) -> None:
-        self._save_preferences()
-        self.timelapse_service.stop()
-        self._stop_live_video()
-        self.controller.timelapse_neopixel_off()
-        self.controller.shutdown()
+        if not self._close_cleanup_done:
+            self._close_cleanup_done = True
+            self.timer.stop()
+            for label, action in (
+                ("Preferences save", self._save_preferences),
+                ("Timelapse stop", self.timelapse_service.stop),
+                ("Live video stop", self._stop_live_video),
+                ("NeoPixel stop", self.controller.timelapse_neopixel_off),
+                ("Controller shutdown", self.controller.shutdown),
+            ):
+                self._run_close_action(label, action)
         super().closeEvent(event)
 
 
