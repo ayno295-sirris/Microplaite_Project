@@ -16,6 +16,8 @@ from microplaite_ui.esp32.v2_transport import V2Transport, V2TransportError
 PROTOCOL_VERSION = 2
 MAX_REQUEST_BYTES = 160
 MAX_RESPONSE_BYTES = 4096
+MAX_PUMP_RPM = 100.0
+PUMP_DIRECTIONS = frozenset({"CW", "CCW"})
 
 
 class ProtocolErrorKind(Enum):
@@ -80,6 +82,8 @@ class V2Status:
     pump_rpm: float | None = None
     pump_full_speed: bool | None = None
     pump_readback_valid: bool | None = None
+    pump_bidirectional_supported: bool | None = None
+    pump_direction: str | None = None
     neopixel_enabled: bool | None = None
     neopixel_brightness: int | None = None
 
@@ -94,6 +98,9 @@ class V2Status:
         safety = _optional_string(payload, "safety")
         if safety is not None and safety not in {"OK", "WARNING", "ERROR"}:
             _invalid_field("safety", "OK, WARNING or ERROR")
+        pump_direction = _optional_string(payload, "pump_direction")
+        if pump_direction is not None and pump_direction not in PUMP_DIRECTIONS:
+            _invalid_field("pump_direction", "CW or CCW")
         return cls(
             uptime_ms=_optional_int(payload, "uptime_ms", minimum=0),
             temp_c=_optional_number(payload, "temp_c"),
@@ -119,6 +126,11 @@ class V2Status:
             pump_rpm=_optional_number(payload, "pump_rpm", minimum=0.0),
             pump_full_speed=_optional_bool(payload, "pump_full_speed"),
             pump_readback_valid=_optional_bool(payload, "pump_readback_valid"),
+            pump_bidirectional_supported=_optional_bool(
+                payload,
+                "pump_bidirectional_supported",
+            ),
+            pump_direction=pump_direction,
             neopixel_enabled=_optional_bool(payload, "neopixel_enabled"),
             neopixel_brightness=_optional_int(
                 payload,
@@ -194,20 +206,22 @@ class V2Client:
     def heater_disable(self) -> V2Response:
         return self.send_request("HEATER_DISABLE")
 
-    def pump_start(self, rpm: float) -> V2Response:
-        return self.send_request("PUMP_START", rpm=float(rpm))
+    def pump_start(self, rpm: float, direction: str | None = None) -> V2Response:
+        return self.send_request("PUMP_START", **_pump_motion_fields(rpm, direction))
 
     def pump_stop(self) -> V2Response:
         return self.send_request("PUMP_STOP")
 
-    def pump_set_rpm(self, rpm: float) -> V2Response:
-        return self.send_request("PUMP_SET_RPM", rpm=float(rpm))
+    def pump_set_rpm(self, rpm: float, direction: str | None = None) -> V2Response:
+        return self.send_request("PUMP_SET_RPM", **_pump_motion_fields(rpm, direction))
 
     def pump_prime(self) -> V2Response:
         return self.send_request("PUMP_PRIME")
 
     def pump_status(self) -> V2Response:
-        return self.send_request("PUMP_STATUS")
+        response = self.send_request("PUMP_STATUS")
+        V2Status.from_payload(response.payload)
+        return response
 
     def neopixel_set(self, enabled: bool, brightness: int) -> V2Response:
         return self.send_request(
@@ -361,6 +375,24 @@ def _optional_bool(payload: Mapping[str, Any], key: str) -> bool | None:
     if not isinstance(value, bool):
         _invalid_field(key, "a boolean")
     return value
+
+
+def _pump_motion_fields(rpm: float, direction: str | None) -> dict[str, Any]:
+    if isinstance(rpm, bool) or not isinstance(rpm, (int, float)):
+        _invalid_request("pump rpm must be a number")
+    amplitude = float(rpm)
+    if not math.isfinite(amplitude) or not 0.0 < amplitude <= MAX_PUMP_RPM:
+        _invalid_request(f"pump rpm must be finite and between 0.1 and {MAX_PUMP_RPM:g}")
+    fields: dict[str, Any] = {"rpm": amplitude}
+    if direction is not None:
+        if not isinstance(direction, str) or direction not in PUMP_DIRECTIONS:
+            _invalid_request("pump direction must be CW or CCW")
+        fields["direction"] = direction
+    return fields
+
+
+def _invalid_request(message: str) -> None:
+    raise V2ProtocolError(ProtocolErrorKind.INVALID_REQUEST, message)
 
 
 def _optional_int(

@@ -10,7 +10,7 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
     store.save(
         UserPreferences(
             target_c=42.25,
-            pump_target_rpm=9.8,
+            pump_target_rpm=-9.8,
             neopixel_enabled=False,
             neopixel_brightness_percent=35,
             timelapse_storage_mode="external",
@@ -30,7 +30,7 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
 
     assert raw["target_c"] == 42.25
     assert loaded.target_c == 42.25
-    assert loaded.pump_target_rpm == 9.8
+    assert loaded.pump_target_rpm == -9.8
     assert loaded.neopixel_enabled is False
     assert loaded.timelapse_storage_mode == "external"
     assert loaded.timelapse_interval_unit == "minutes"
@@ -45,7 +45,7 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
         json.dumps(
             {
                 "target_c": 999,
-                "pump_target_rpm": -10,
+                "pump_target_rpm": -100.1,
                 "neopixel_brightness_percent": 500,
                 "timelapse_storage_mode": "bad",
                 "timelapse_interval_value": 0,
@@ -71,3 +71,40 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
     assert prefs.timelapse_total_duration_min == 1
     assert prefs.live_record_video is True
     assert prefs.video_storage_mode == "internal"
+
+
+def test_preferences_normalize_signed_pump_target(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"pump_target_rpm": -0.14}', encoding="utf-8")
+
+    prefs = PreferencesStore(path).load()
+
+    assert prefs.pump_target_rpm == -0.1
+
+
+def test_preferences_use_safe_zero_for_non_finite_pump_target(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"pump_target_rpm": NaN}', encoding="utf-8")
+
+    prefs = PreferencesStore(path).load()
+
+    assert prefs.pump_target_rpm == 0.0
+
+
+def test_preferences_use_safe_zero_for_invalid_pump_target_type(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"pump_target_rpm": "-10"}', encoding="utf-8")
+
+    prefs = PreferencesStore(path).load()
+
+    assert prefs.pump_target_rpm == 0.0
+
+
+def test_preferences_save_normalizes_invalid_pump_target_to_safe_zero(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    store = PreferencesStore(path)
+
+    store.save(UserPreferences(pump_target_rpm=float("inf")))
+
+    assert json.loads(path.read_text(encoding="utf-8"))["pump_target_rpm"] == 0.0
+    assert store.load().pump_target_rpm == 0.0

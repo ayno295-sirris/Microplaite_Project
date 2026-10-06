@@ -8,10 +8,15 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from microplaite_ui.config import APP_NAME, DEFAULT_TARGET_C, THERMAL_TEST_MAX_TARGET_C
-
+from microplaite_ui.config import (
+    APP_NAME,
+    DEFAULT_TARGET_C,
+    THERMAL_TEST_MAX_TARGET_C,
+)
+from microplaite_ui.core.state import normalize_pump_target_rpm
 
 PREFERENCES_PATH_ENV = "MICROPLAITE_PREFERENCES_PATH"
+INVALID_PUMP_TARGET_DEFAULT_RPM = 0.0
 
 
 @dataclass(slots=True)
@@ -47,7 +52,11 @@ class PreferencesStore:
     def save(self, preferences: UserPreferences) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_text(json.dumps(asdict(preferences), indent=2), encoding="utf-8")
+        validated = _validated(asdict(preferences))
+        temp.write_text(
+            json.dumps(asdict(validated), indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
         temp.replace(self.path)
 
 
@@ -70,7 +79,10 @@ def _validated(raw: dict[str, Any]) -> UserPreferences:
         DEFAULT_TARGET_C,
         2,
     )
-    prefs.pump_target_rpm = _clamp_float(prefs.pump_target_rpm, 0.0, 100.0, 50.0, 1)
+    try:
+        prefs.pump_target_rpm = normalize_pump_target_rpm(prefs.pump_target_rpm)
+    except (TypeError, ValueError):
+        prefs.pump_target_rpm = INVALID_PUMP_TARGET_DEFAULT_RPM
     prefs.neopixel_enabled = bool(prefs.neopixel_enabled)
     prefs.neopixel_brightness_percent = _clamp_int(prefs.neopixel_brightness_percent, 0, 100, 80)
     prefs.timelapse_storage_mode = prefs.timelapse_storage_mode if prefs.timelapse_storage_mode in {"internal", "external"} else "internal"

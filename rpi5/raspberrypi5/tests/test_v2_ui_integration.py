@@ -8,10 +8,11 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from microplaite_ui.core.controller import AppController
+from microplaite_ui.core.state import normalize_pump_target_rpm
 from microplaite_ui.esp32.client import Esp32ClientError
 from microplaite_ui.esp32.fake_client import FakeEsp32Client
 from microplaite_ui.esp32.parser import ParsedMessage
-from microplaite_ui.esp32.v2_client import V2Response, V2Status
+from microplaite_ui.esp32.v2_client import V2Esp32Error, V2Response, V2Status
 from microplaite_ui.esp32.v2_session import SessionState
 from microplaite_ui.esp32.v2_ui_client import V2UiClient
 from microplaite_ui.main import create_v2_ui_client
@@ -32,6 +33,7 @@ class RecordingV2Client:
         self.release_status = threading.Event()
         self.block_status = False
         self.status_error: Exception | None = None
+        self.pump_status_payload: dict[str, object] = {"pump_readback_valid": True}
 
     def status(self) -> V2Status:
         self.calls.append(("status",))
@@ -64,20 +66,22 @@ class RecordingV2Client:
     def heater_disable(self) -> V2Response:
         return self._record("heater_disable")
 
-    def pump_start(self, rpm: float) -> V2Response:
-        return self._record("pump_start", rpm)
+    def pump_start(self, rpm: float, direction: str | None = None) -> V2Response:
+        args = (rpm,) if direction is None else (rpm, direction)
+        return self._record("pump_start", *args)
 
     def pump_stop(self) -> V2Response:
         return self._record("pump_stop")
 
-    def pump_set_rpm(self, rpm: float) -> V2Response:
-        return self._record("pump_set_rpm", rpm)
+    def pump_set_rpm(self, rpm: float, direction: str | None = None) -> V2Response:
+        args = (rpm,) if direction is None else (rpm, direction)
+        return self._record("pump_set_rpm", *args)
 
     def pump_prime(self) -> V2Response:
         return self._record("pump_prime")
 
     def pump_status(self) -> V2Response:
-        return self._record("pump_status", pump_readback_valid=True)
+        return self._record("pump_status", **self.pump_status_payload)
 
     def neopixel_set(self, enabled: bool, brightness: int) -> V2Response:
         return self._record("neopixel_set", enabled, brightness)
@@ -162,6 +166,365 @@ def _wait_recipe(controller: AppController, timeout: float = 1.0) -> None:
 
 
 @pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (10, 10.0),
+        (-10, -10.0),
+        (0.14, 0.1),
+        (-0.14, -0.1),
+        (0.15, 0.2),
+        (-0.15, -0.2),
+        (0.0, 0.0),
+        (-0.0, 0.0),
+        (100.0, 100.0),
+        (-100.0, -100.0),
+    ],
+)
+def test_normalizes_signed_pump_target_to_one_decimal(value, expected) -> None:
+    result = normalize_pump_target_rpm(value)
+
+    assert result == expected
+    if expected == 0.0:
+        assert str(result) == "0.0"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, "10", None, float("nan"), float("inf"), float("-inf"), 100.1, -100.1],
+)
+def test_rejects_invalid_signed_pump_target(value) -> None:
+    with pytest.raises((TypeError, ValueError), match="pump target"):
+        normalize_pump_target_rpm(value)
+
+
+@pytest.mark.parametrize("direction", ["CW", "CCW"])
+def test_status_propagates_bidirectional_capability_and_reported_direction(
+    direction: str,
+) -> None:
+    controller, client, _ = _ready_controller()
+    client.status_value = _status(
+        pump_bidirectional_supported=True,
+        pump_direction=direction,
+        pump_readback_valid=True,
+    )
+
+    controller.refresh_status()
+
+    assert controller.state.pump.bidirectional_supported is True
+    assert controller.state.pump.direction == direction
+
+
+def test_status_without_capability_clears_previous_bidirectional_support() -> None:
+    controller, client, _ = _ready_controller()
+    client.status_value = _status(
+        pump_bidirectional_supported=True,
+        pump_direction="CCW",
+    )
+    controller.refresh_status()
+    client.status_value = _status(
+        pump_bidirectional_supported=None,
+        pump_direction=None,
+    )
+
+    controller.refresh_status()
+
+    assert controller.state.pump.bidirectional_supported is None
+    assert controller.state.pump.direction is None
+
+
+def test_unconfirmed_status_direction_is_not_kept_as_controller_state() -> None:
+    controller, client, _ = _ready_controller()
+    client.status_value = _status(
+        pump_bidirectional_supported=True,
+        pump_direction="CCW",
+        pump_readback_valid=False,
+    )
+
+    controller.refresh_status()
+
+    assert controller.state.pump.direction is None
+
+
+def test_old_firmware_positive_start_keeps_legacy_json_shape() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = None
+    controller.state.pump.running = False
+    controller.state.pump.readback = True
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(10.0)
+    controller.start_pump()
+
+    assert client.calls == [("pump_start", 10.0), ("pump_status",)]
+
+
+def test_old_firmware_rejects_negative_target_without_command() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = None
+    controller.state.pump.running = False
+    controller.state.pump.readback = True
+    previous_target = controller.state.pump.target_rpm
+    client.calls.clear()
+
+    with pytest.raises(ValueError, match="bidirectional"):
+        controller.set_pump_target_rpm(-10.0)
+
+    assert controller.state.pump.target_rpm == previous_target
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("target", "amplitude", "direction"),
+    [
+        (-100.0, 100.0, "CCW"),
+        (-10.0, 10.0, "CCW"),
+        (-0.1, 0.1, "CCW"),
+        (0.1, 0.1, "CW"),
+        (10.0, 10.0, "CW"),
+        (100.0, 100.0, "CW"),
+    ],
+)
+def test_bidirectional_start_sends_positive_amplitude_and_direction(
+    target: float,
+    amplitude: float,
+    direction: str,
+) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.running = False
+    controller.state.pump.readback = True
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(target)
+    controller.start_pump()
+
+    assert controller.state.pump.target_rpm == target
+    assert client.calls == [("pump_start", amplitude, direction), ("pump_status",)]
+
+
+@pytest.mark.parametrize(
+    ("current_target", "reported_direction", "new_target", "direction"),
+    [(5.0, "CW", 10.0, "CW"), (-5.0, "CCW", -10.0, "CCW")],
+)
+def test_running_same_direction_updates_signed_target(
+    current_target: float,
+    reported_direction: str,
+    new_target: float,
+    direction: str,
+) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = current_target
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = reported_direction
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(new_target)
+
+    assert controller.state.pump.target_rpm == new_target
+    assert client.calls == [("pump_set_rpm", abs(new_target), direction), ("pump_status",)]
+
+
+@pytest.mark.parametrize(
+    ("current_target", "reported_direction", "new_target"),
+    [(10.0, "CW", -10.0), (-10.0, "CCW", 10.0)],
+)
+def test_running_sign_change_stops_and_requires_fresh_confirmation(
+    current_target: float,
+    reported_direction: str,
+    new_target: float,
+) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = current_target
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = reported_direction
+    client.pump_status_payload = {
+        "pump_running": False,
+        "pump_rpm": 0.1,
+        "pump_readback_valid": True,
+        "pump_direction": reported_direction,
+    }
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(new_target)
+
+    assert controller.state.pump.target_rpm == new_target
+    assert controller.state.pump.running is False
+    assert controller.state.pump.direction_change_pending is False
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+    assert not any(call[0] == "pump_start" for call in client.calls)
+
+
+def test_explicit_start_after_confirmed_sign_change_starts_new_direction() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = 10.0
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+    client.pump_status_payload = {
+        "pump_running": False,
+        "pump_readback_valid": True,
+        "pump_direction": "CW",
+    }
+
+    controller.set_pump_target_rpm(-10.0)
+    client.calls.clear()
+    controller.start_pump()
+
+    assert client.calls == [("pump_start", 10.0, "CCW"), ("pump_status",)]
+
+
+@pytest.mark.parametrize(
+    "pump_status_payload",
+    [
+        {"pump_running": False, "pump_readback_valid": False, "pump_direction": "CW"},
+        {"pump_running": True, "pump_readback_valid": True, "pump_direction": "CW"},
+    ],
+)
+def test_running_sign_change_stays_blocked_without_fresh_stop_confirmation(
+    pump_status_payload: dict[str, object],
+) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = 10.0
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+    client.pump_status_payload = pump_status_payload
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(-10.0)
+    controller.start_pump()
+
+    assert controller.state.pump.target_rpm == -10.0
+    assert controller.state.pump.direction_change_pending is True
+    assert "not confirmed" in controller.state.last_error.lower()
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+
+
+def test_running_sign_change_transport_failure_never_starts_inverse_direction() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = 10.0
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+
+    def fail_status() -> V2Response:
+        client.calls.append(("pump_status",))
+        raise RuntimeError("pump status timeout")
+
+    client.pump_status = fail_status
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(-10.0)
+
+    assert controller.state.connected is False
+    assert controller.state.pump.direction_change_pending is False
+    assert "pump status timeout" in controller.state.last_message
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+    assert not any(call[0] == "pump_start" for call in client.calls)
+
+
+@pytest.mark.parametrize("stop_kind", ["pump", "global"])
+def test_operator_stop_cancels_pending_direction_change(stop_kind: str) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.direction_change_pending = True
+    client.calls.clear()
+
+    if stop_kind == "pump":
+        controller.stop_pump()
+    else:
+        controller.stop()
+
+    assert controller.state.pump.direction_change_pending is False
+    expected = [("pump_stop",), ("pump_status",)] if stop_kind == "pump" else [("stop",)]
+    assert client.calls == expected
+    assert not any(call[0] == "pump_start" for call in client.calls)
+
+
+def test_lost_and_reconnect_cancel_pending_change_without_resuming_pump() -> None:
+    controller, client, session = _ready_controller()
+    controller.state.pump.direction_change_pending = True
+    session.state = SessionState.LOST
+
+    controller.poll_serial()
+
+    assert controller.state.pump.direction_change_pending is False
+    client.status_value = _status(
+        pump_running=False,
+        pump_readback_valid=True,
+        pump_bidirectional_supported=True,
+        pump_direction="CW",
+        system_state="READY",
+    )
+    client.calls.clear()
+    controller.reconnect()
+
+    assert controller.state.pump.direction_change_pending is False
+    assert not any(call[0] == "pump_start" for call in client.calls)
+
+
+def test_fault_cancels_pending_direction_change() -> None:
+    controller, _, _ = _ready_controller()
+    controller.state.pump.direction_change_pending = True
+
+    controller._apply(
+        ParsedMessage(
+            ok=True,
+            is_status=True,
+            fields={"system_state": "FAULT"},
+            raw="V2 STATUS",
+        )
+    )
+
+    assert controller.state.pump.direction_change_pending is False
+
+
+@pytest.mark.parametrize("zero", [0.0, -0.0])
+def test_zero_target_uses_pump_stop_never_zero_motion_command(zero: float) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+    client.pump_status_payload = {
+        "pump_running": False,
+        "pump_readback_valid": True,
+        "pump_direction": "CW",
+    }
+    client.calls.clear()
+
+    controller.set_pump_target_rpm(zero)
+
+    assert controller.state.pump.target_rpm == 0.0
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+
+
+def test_prime_refusal_is_reported_without_automatic_stop_or_connection_loss() -> None:
+    controller, client, _ = _ready_controller()
+
+    def reject_prime() -> V2Response:
+        client.calls.append(("pump_prime",))
+        raise V2Esp32Error(12, "PUMP_PRIME", "PUMP_REQUIRES_STOP")
+
+    client.pump_prime = reject_prime
+    client.calls.clear()
+
+    controller.prime_pump()
+
+    assert controller.state.connected is True
+    assert controller.state.last_error == "PUMP_REQUIRES_STOP"
+    assert client.calls == [("pump_prime",), ("pump_status",)]
+    assert ("pump_stop",) not in client.calls
+    assert ("stop",) not in client.calls
+
+
+@pytest.mark.parametrize(
     ("step", "expected"),
     [
         (
@@ -197,13 +560,119 @@ def test_recipe_action_maps_to_existing_v2_command(
 ) -> None:
     controller, client, _ = _ready_controller()
     client.calls.clear()
-    controller.state.pump.running = False
+    controller.state.pump.running = step.action is RecipeAction.PUMP_SET_RPM
+    controller.state.pump.readback = True
 
     controller.start_recipe(_recipe(step))
     _wait_recipe(controller)
 
     assert controller.recipe_progress.state is RecipeRunState.COMPLETED
     assert client.calls == expected
+
+
+def test_recipe_negative_start_maps_to_positive_amplitude_and_ccw() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.running = False
+    controller.state.pump.readback = True
+    client.calls.clear()
+
+    controller.start_recipe(
+        _recipe(RecipeStep(RecipeAction.PUMP_START, rpm=-3.0))
+    )
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert controller.state.pump.target_rpm == -3.0
+    assert client.calls == [("pump_start", 3.0, "CCW"), ("pump_status",)]
+
+
+def test_recipe_negative_target_is_rejected_without_bidirectional_capability() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = None
+    controller.state.pump.running = False
+    controller.state.pump.readback = True
+    client.calls.clear()
+
+    controller.start_recipe(
+        _recipe(RecipeStep(RecipeAction.PUMP_START, rpm=-3.0))
+    )
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.ERROR
+    assert "bidirectional" in controller.recipe_progress.error
+    assert not any(call[0] == "pump_start" for call in client.calls)
+    assert client.calls == [("stop",)]
+
+
+def test_recipe_negative_same_direction_update_uses_ccw() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = -3.0
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CCW"
+    client.calls.clear()
+
+    controller.start_recipe(
+        _recipe(RecipeStep(RecipeAction.PUMP_SET_RPM, rpm=-4.0))
+    )
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert client.calls == [("pump_set_rpm", 4.0, "CCW"), ("pump_status",)]
+
+
+@pytest.mark.parametrize(
+    "action",
+    [RecipeAction.PUMP_START, RecipeAction.PUMP_SET_RPM],
+)
+def test_recipe_zero_stops_running_pump_without_zero_motion_command(
+    action: RecipeAction,
+) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+    client.pump_status_payload = {
+        "pump_running": False,
+        "pump_readback_valid": True,
+        "pump_direction": "CW",
+    }
+    client.calls.clear()
+
+    controller.start_recipe(_recipe(RecipeStep(action, rpm=0.0)))
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+    assert not any(call[0] in {"pump_start", "pump_set_rpm"} for call in client.calls)
+
+
+def test_recipe_sign_change_stops_and_does_not_auto_start() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.pump.bidirectional_supported = True
+    controller.state.pump.target_rpm = 3.0
+    controller.state.pump.running = True
+    controller.state.pump.readback = True
+    controller.state.pump.direction = "CW"
+    client.pump_status_payload = {
+        "pump_running": False,
+        "pump_readback_valid": True,
+        "pump_direction": "CW",
+    }
+    client.calls.clear()
+
+    controller.start_recipe(
+        _recipe(RecipeStep(RecipeAction.PUMP_SET_RPM, rpm=-4.0))
+    )
+    _wait_recipe(controller)
+
+    assert controller.recipe_progress.state is RecipeRunState.COMPLETED
+    assert controller.state.pump.target_rpm == -4.0
+    assert client.calls == [("pump_stop",), ("pump_status",)]
+    assert not any(call[0] == "pump_start" for call in client.calls)
 
 
 def test_recipe_pid_on_uses_existing_ordered_pid_start_sequence() -> None:

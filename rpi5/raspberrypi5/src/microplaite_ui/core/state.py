@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 
 from microplaite_ui.config import DEFAULT_TARGET_C
 
 TEMP_HISTORY_MAXLEN = 1500
+PUMP_MAX_RPM = 100.0
+
+
+def normalize_pump_target_rpm(value: object) -> float:
+    """Validate and normalize a signed user pump target to 0.1 RPM."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("pump target must be a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("pump target must be finite")
+    if not -PUMP_MAX_RPM <= number <= PUMP_MAX_RPM:
+        raise ValueError(f"pump target must be between {-PUMP_MAX_RPM:g} and {PUMP_MAX_RPM:g}")
+    normalized = float(
+        Decimal(str(number)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    )
+    return 0.0 if normalized == 0.0 else normalized
 
 
 @dataclass(slots=True)
@@ -46,7 +65,9 @@ class PumpState:
     running: bool = False
     actual_rpm: float = 0.0
     target_rpm: float = 50.0
-    direction: str = "forward"
+    direction: str | None = None
+    bidirectional_supported: bool | None = None
+    direction_change_pending: bool = False
     full_speed: bool = False
     readback: bool | None = None
 
@@ -353,6 +374,24 @@ class AppState:
     @pump_readback_valid.setter
     def pump_readback_valid(self, value: bool | None) -> None:
         self.pump_readback = value
+
+    @property
+    def pump_bidirectional_supported(self) -> bool | None:
+        return self.pump.bidirectional_supported
+
+    @pump_bidirectional_supported.setter
+    def pump_bidirectional_supported(self, value: bool | None) -> None:
+        self.pump.supported = True
+        self.pump.bidirectional_supported = value
+
+    @property
+    def pump_direction(self) -> str | None:
+        return self.pump.direction
+
+    @pump_direction.setter
+    def pump_direction(self, value: str | None) -> None:
+        self.pump.supported = True
+        self.pump.direction = value
 
     @property
     def neopixel_enabled(self) -> bool:

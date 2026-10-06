@@ -62,6 +62,31 @@ class MemoryTransport:
             b'{"v":2,"id":10,"cmd":"PUMP_START","rpm":3.0}\n',
         ),
         (
+            b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_START"}\n',
+            lambda client: client.pump_start(10.0, "CCW"),
+            b'{"v":2,"id":10,"cmd":"PUMP_START","rpm":10.0,"direction":"CCW"}\n',
+        ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_SET_RPM"}\n',
+            lambda client: client.pump_set_rpm(0.1, "CW"),
+            b'{"v":2,"id":10,"cmd":"PUMP_SET_RPM","rpm":0.1,"direction":"CW"}\n',
+        ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_STOP"}\n',
+            lambda client: client.pump_stop(),
+            b'{"v":2,"id":10,"cmd":"PUMP_STOP"}\n',
+        ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_PRIME"}\n',
+            lambda client: client.pump_prime(),
+            b'{"v":2,"id":10,"cmd":"PUMP_PRIME"}\n',
+        ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"PUMP_STATUS"}\n',
+            lambda client: client.pump_status(),
+            b'{"v":2,"id":10,"cmd":"PUMP_STATUS"}\n',
+        ),
+        (
             b'{"v":2,"id":10,"type":"OK","cmd":"HEATER_ENABLE"}\n',
             lambda client: client.heater_enable("PID"),
             b'{"v":2,"id":10,"cmd":"HEATER_ENABLE","mode":"PID"}\n',
@@ -239,6 +264,8 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
         "pump_rpm": 3.0,
         "pump_full_speed": False,
         "pump_readback_valid": True,
+        "pump_bidirectional_supported": True,
+        "pump_direction": "CCW",
         "neopixel_enabled": True,
         "neopixel_brightness": 35,
         "future_field": "ignored",
@@ -269,6 +296,8 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
     assert status.pump_full_speed is False
     assert status.pump_readback_valid is True
     assert status.confirmed_pump_running is True
+    assert status.pump_bidirectional_supported is True
+    assert status.pump_direction == "CCW"
     assert status.neopixel_enabled is True
     assert status.neopixel_brightness == 35
     assert not hasattr(status, "future_field")
@@ -304,6 +333,84 @@ def test_rejects_invalid_present_status_field() -> None:
         client.status()
 
     assert error.value.kind is ProtocolErrorKind.INVALID_FIELD
+
+
+@pytest.mark.parametrize("direction", ["forward", "REVERSE", "cw", 1, True])
+def test_rejects_invalid_pump_direction_in_status(direction) -> None:
+    payload = {
+        "v": 2,
+        "id": 10,
+        "type": "STATUS",
+        "pump_direction": direction,
+    }
+    transport = MemoryTransport([(json.dumps(payload) + "\n").encode()])
+    client = V2Client(transport, initial_request_id=10)
+    client.open()
+
+    with pytest.raises(V2ProtocolError) as error:
+        client.status()
+
+    assert error.value.kind is ProtocolErrorKind.INVALID_FIELD
+
+
+def test_rejects_invalid_pump_direction_in_pump_status_response() -> None:
+    payload = {
+        "v": 2,
+        "id": 10,
+        "type": "OK",
+        "cmd": "PUMP_STATUS",
+        "pump_readback_valid": True,
+        "pump_direction": "REVERSE",
+    }
+    transport = MemoryTransport([(json.dumps(payload) + "\n").encode()])
+    client = V2Client(transport, initial_request_id=10)
+    client.open()
+
+    with pytest.raises(V2ProtocolError) as error:
+        client.pump_status()
+
+    assert error.value.kind is ProtocolErrorKind.INVALID_FIELD
+
+
+@pytest.mark.parametrize(
+    "rpm",
+    [
+        -10.0,
+        -0.1,
+        -0.0,
+        0.0,
+        100.1,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        "10",
+        None,
+        True,
+    ],
+)
+def test_pump_motion_request_rejects_invalid_amplitude_before_write(rpm) -> None:
+    transport = MemoryTransport()
+    client = V2Client(transport, initial_request_id=10)
+    client.open()
+
+    with pytest.raises(V2ProtocolError) as error:
+        client.pump_start(rpm, "CCW")
+
+    assert error.value.kind is ProtocolErrorKind.INVALID_REQUEST
+    assert transport.writes == []
+
+
+@pytest.mark.parametrize("direction", ["forward", "REVERSE", "cw", "", 1, True])
+def test_pump_motion_request_rejects_invalid_direction_before_write(direction) -> None:
+    transport = MemoryTransport()
+    client = V2Client(transport, initial_request_id=10)
+    client.open()
+
+    with pytest.raises(V2ProtocolError) as error:
+        client.pump_set_rpm(10.0, direction)
+
+    assert error.value.kind is ProtocolErrorKind.INVALID_REQUEST
+    assert transport.writes == []
 
 
 def test_rejects_request_larger_than_160_utf8_bytes_before_write() -> None:

@@ -16,7 +16,7 @@ from microplaite_ui.config import (
     DEFAULT_PID_LIMIT,
     THERMAL_TEST_MAX_TARGET_C,
 )
-from microplaite_ui.core.state import AppState
+from microplaite_ui.core.state import AppState, normalize_pump_target_rpm
 from microplaite_ui.esp32.client import Esp32Client, Esp32ClientError
 from microplaite_ui.esp32.parser import ParsedMessage, parse_line
 from microplaite_ui.services.recipe_runner import (
@@ -45,12 +45,14 @@ class AppController:
         self._recipe_status_sequence = 0
 
     def open_connection(self) -> AppState:
+        self.state.pump.direction_change_pending = False
         open_session = getattr(self.client, "open_session", None)
         if callable(open_session):
             return self._call(open_session)
         return self.refresh_status()
 
     def reconnect(self) -> AppState:
+        self.state.pump.direction_change_pending = False
         reconnect_session = getattr(self.client, "reconnect_session", None)
         if not callable(reconnect_session):
             return self.state
@@ -85,6 +87,7 @@ class AppController:
                         self._apply(message)
         except Esp32ClientError as exc:
             self._mark_connection_lost(str(exc))
+            return self.state
         return self.state
 
     def start_pid(self) -> AppState:
@@ -108,6 +111,7 @@ class AppController:
         return self._call(self.client.pid_off)
 
     def stop(self) -> AppState:
+        self.state.pump.direction_change_pending = False
         self.cancel_recipe()
         return self._call(self.client.stop)
 
@@ -177,15 +181,37 @@ class AppController:
         self.set_neopixel_brightness(percent)
 
     def set_pump_target_rpm(self, rpm: float) -> str:
-        self.state.pump.target_rpm = round(max(0.0, min(100.0, float(rpm))), 1)
-        if self.state.pump.running:
-            if not self._activation_allowed():
-                self._reject_activation()
-                return self.state.last_message
-            self.state.pump.readback = None
-            self._call(lambda: self.client.pump_set_rpm(self.state.pump.target_rpm))
-            self._poll_pump_status()
+        target = self.prepare_pump_target_rpm(rpm)
+        if target == 0.0:
+            self.stop_pump()
+            return self.state.last_message
+        if not self.state.pump.running:
+            return self.state.last_message
+        if self.state.pump.readback is not True:
+            return self._set_pump_error("Pump readback is unconfirmed; RPM was not applied")
+        if not self._activation_allowed():
+            self._reject_activation()
+            return self.state.last_message
+
+        requested_direction = self._pump_target_direction(target)
+        reported_direction = self._reported_pump_direction()
+        if reported_direction is None:
+            return self._set_pump_error("Pump direction is unconfirmed; RPM was not applied")
+        if requested_direction != reported_direction:
+            self._stop_for_direction_change()
+            return self.state.last_message
+
+        self.state.pump.readback = None
+        self._call(self._pump_set_rpm_action(abs(target), requested_direction))
+        self._poll_pump_status()
         return self.state.last_message
+
+    def prepare_pump_target_rpm(self, rpm: object) -> float:
+        target = normalize_pump_target_rpm(rpm)
+        if target < 0.0 and self.state.pump.bidirectional_supported is not True:
+            raise ValueError("negative pump target requires bidirectional firmware support")
+        self.state.pump.target_rpm = target
+        return target
 
     def set_pump_rpm(self, rpm: float) -> str:
         return self.set_pump_target_rpm(rpm)
@@ -194,12 +220,28 @@ class AppController:
         if not self._activation_allowed():
             self._reject_activation()
             return self.state.last_message
+        target = normalize_pump_target_rpm(self.state.pump.target_rpm)
+        if target < 0.0 and self.state.pump.bidirectional_supported is not True:
+            return self._set_pump_error(
+                "Pump bidirectional support is required for a negative target"
+            )
+        if self.state.pump.direction_change_pending:
+            return self._set_pump_error("Pump direction change stop is not confirmed")
+        if target == 0.0:
+            if self.state.pump.readback is not True or self.state.pump.running:
+                return self.stop_pump()
+            self.state.last_message = "Pump already stopped"
+            return self.state.last_message
+        if self._is_v2 and self.state.pump.readback is not True:
+            return self._set_pump_error("Pump readback is unconfirmed; START was not sent")
+        direction = self._pump_target_direction(target)
         self.state.pump.readback = None
-        self._call(lambda: self.client.pump_start(self.state.pump.target_rpm))
+        self._call(self._pump_start_action(abs(target), direction))
         self._poll_pump_status()
         return self.state.last_message
 
     def stop_pump(self) -> str:
+        self.state.pump.direction_change_pending = False
         self.state.pump.readback = None
         self._call(self.client.pump_stop)
         self._poll_pump_status()
@@ -213,6 +255,56 @@ class AppController:
         self._call(self.client.pump_prime)
         self._poll_pump_status()
         return self.state.last_message
+
+    def _pump_start_action(self, rpm: float, direction: str) -> Callable[[], ParsedMessage]:
+        if self.state.pump.bidirectional_supported is True:
+            return lambda: self.client.pump_start(rpm, direction)
+        return lambda: self.client.pump_start(rpm)
+
+    def _pump_set_rpm_action(self, rpm: float, direction: str) -> Callable[[], ParsedMessage]:
+        if self.state.pump.bidirectional_supported is True:
+            return lambda: self.client.pump_set_rpm(rpm, direction)
+        return lambda: self.client.pump_set_rpm(rpm)
+
+    @staticmethod
+    def _pump_target_direction(target: float) -> str:
+        return "CW" if target > 0.0 else "CCW"
+
+    def _reported_pump_direction(self) -> str | None:
+        if self.state.pump.readback is not True:
+            return None
+        if self.state.pump.direction in {"CW", "CCW"}:
+            return self.state.pump.direction
+        if self.state.pump.bidirectional_supported is not True:
+            return "CW"
+        return None
+
+    def _stop_for_direction_change(self) -> None:
+        self.state.pump.direction_change_pending = True
+        self.state.pump.readback = None
+        stop_response = self._call_message(self.client.pump_stop)
+        if stop_response is None:
+            return
+        status_response = self._poll_pump_status()
+        if status_response is None:
+            return
+        fields = status_response.fields
+        if (
+            fields.get("pump_readback_valid") is not True
+            or fields.get("pump_running") is not False
+        ):
+            self._set_pump_error("Pump direction change stop was not confirmed")
+            return
+        self.state.pump.direction_change_pending = False
+        if self.state.last_error.startswith("Pump direction change"):
+            self.state.last_error = ""
+        self.state.last_message = "Pump stopped; press START to run in the new direction"
+
+    def _set_pump_error(self, message: str) -> str:
+        self.state.last_message = message
+        self.state.last_error = message
+        self.logs.append(message)
+        return message
 
     def start_logging(self) -> Path | None:
         try:
@@ -289,9 +381,10 @@ class AppController:
         self.logs.append(message)
         return message
 
-    def _poll_pump_status(self) -> None:
+    def _poll_pump_status(self) -> ParsedMessage | None:
         if self.state.connected:
-            self._call(self.client.pump_status)
+            return self._call_message(self.client.pump_status)
+        return None
 
     def _execute_recipe_command(self, step: RecipeStep) -> None:
         if step.action is RecipeAction.SET_TEMPERATURE:
@@ -305,15 +398,12 @@ class AppController:
         elif step.action is RecipeAction.PUMP_START:
             if step.rpm is None:
                 raise RecipeExecutionError("PUMP_START requires rpm")
-            self.state.pump.target_rpm = step.rpm
+            self.prepare_pump_target_rpm(step.rpm)
             self.start_pump()
         elif step.action is RecipeAction.PUMP_SET_RPM:
             if step.rpm is None:
                 raise RecipeExecutionError("PUMP_SET_RPM requires rpm")
-            self.state.pump.target_rpm = step.rpm
-            self.state.pump.readback = None
-            self._call(lambda: self.client.pump_set_rpm(step.rpm))
-            self._poll_pump_status()
+            self.set_pump_target_rpm(step.rpm)
         elif step.action is RecipeAction.PUMP_STOP:
             self.stop_pump()
         elif step.action is RecipeAction.PUMP_PRIME:
@@ -347,9 +437,14 @@ class AppController:
             raise RecipeExecutionError(self.state.last_error)
 
     def _send_recipe_global_stop(self) -> None:
+        self.state.pump.direction_change_pending = False
         self._call(self.client.stop)
 
     def _call(self, action: Callable[[], ParsedMessage]) -> AppState:
+        self._call_message(action)
+        return self.state
+
+    def _call_message(self, action: Callable[[], ParsedMessage]) -> ParsedMessage | None:
         try:
             with self._client_lock:
                 message = action()
@@ -358,13 +453,16 @@ class AppController:
             self._sync_session_state()
         except Esp32ClientError as exc:
             self._mark_connection_lost(str(exc))
+            return None
         except Exception as exc:
+            self.state.pump.direction_change_pending = False
             self.state.connected = False
             self.state.last_message = f"Unexpected error: {exc}"
             if not self.state.last_error:
                 self.state.last_error = self.state.last_message
             self.logs.append(self.state.last_message)
-        return self.state
+            return None
+        return message
 
     def _sync_session_state(self) -> None:
         session_state = getattr(self.client, "session_state", None)
@@ -376,6 +474,7 @@ class AppController:
             self._mark_connection_lost("V2 session LOST")
 
     def _mark_connection_lost(self, message: str) -> None:
+        self.state.pump.direction_change_pending = False
         self._recipe_runner.fail("Connection LOST", request_stop=False)
         self.stop_logging()
         self.state.connected = False
@@ -388,11 +487,29 @@ class AppController:
         self.logs.append(message)
 
     def _apply(self, message: ParsedMessage) -> None:
+        direction = message.fields.get("pump_direction")
+        has_direction = "pump_direction" in message.fields
+        readback = message.fields.get(
+            "pump_readback_valid",
+            message.fields.get("pump_readback"),
+        )
         for key, value in message.fields.items():
+            if key == "pump_direction":
+                continue
             if hasattr(self.state, key):
                 if key == "last_error" and isinstance(value, str) and value.upper() == "NONE":
                     value = ""
                 setattr(self.state, key, value)
+        if has_direction:
+            self.state.pump_direction = direction if readback is True else None
+        elif readback is not None and readback is not True:
+            self.state.pump_direction = None
+        if (
+            self.state.system_state == "FAULT"
+            or self.state.safety == "ERROR"
+            or self.state.error_latched is True
+        ):
+            self.state.pump.direction_change_pending = False
         if message.is_status and message.ok is True and self._is_v2:
             self._recipe_status_sequence += 1
             sample = RecipeStatusSample(

@@ -830,13 +830,13 @@ class MainWindow(QMainWindow):
         speed_row = QHBoxLayout()
         speed_row.addWidget(self._caption_large("Rotation speed setpoint"))
         speed_row.addStretch()
-        self.pump_target_rpm = QLabel("50 RPM")
+        self.pump_target_rpm = QLabel("+50.0 RPM")
         self.pump_target_rpm.setObjectName("mediumValue")
         speed_row.addWidget(self.pump_target_rpm)
         box.addLayout(speed_row)
         self.pump_slider = QSlider(Qt.Horizontal)
         self.pump_slider.setObjectName("rpmSlider")
-        self.pump_slider.setRange(0, 100)
+        self.pump_slider.setRange(-100, 100)
         self.pump_slider.setValue(50)
         self.pump_slider.valueChanged.connect(self._set_pump_target_rpm)
         box.addWidget(self.pump_slider)
@@ -847,7 +847,7 @@ class MainWindow(QMainWindow):
         self.pump_plus_button = self._button("+", "rpmStepButton", 98, 74)
         self.pump_spin = QDoubleSpinBox()
         self.pump_spin.setObjectName("rpmSpinBox")
-        self.pump_spin.setRange(0.0, 100.0)
+        self.pump_spin.setRange(-100.0, 100.0)
         self.pump_spin.setDecimals(1)
         self.pump_spin.setSingleStep(0.1)
         self.pump_spin.setSuffix(" RPM")
@@ -2360,13 +2360,20 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _set_pump_target_rpm(self, rpm: float) -> None:
-        self.controller.set_pump_target_rpm(rpm)
+        try:
+            self.controller.set_pump_target_rpm(rpm)
+        except ValueError as exc:
+            message = f"Pump target rejected: {exc}"
+            self.controller.state.last_message = message
+            self.controller.logs.append(message)
         self._save_preferences()
         self._render()
 
     def _nudge_pump_target(self, direction: int) -> None:
         current = float(self.controller.state.pump.target_rpm)
-        fine_step = current < 10.0 or (direction < 0 and current <= 10.0)
+        fine_step = abs(current) < 10.0 or (
+            abs(current) <= 10.0 and current * direction < 0.0
+        )
         step = 0.1 if fine_step else 1.0
         self._set_pump_target_rpm(current + (step * direction))
 
@@ -2556,7 +2563,7 @@ class MainWindow(QMainWindow):
         self._set_dot(self.pump_dot, state.pump.readback is True and state.pump.running)
         self.pump_status.setText(pump_status)
         self.pump_actual_rpm.setText(_rpm(state.pump.actual_rpm))
-        self.pump_target_rpm.setText(_rpm(state.pump.target_rpm))
+        self.pump_target_rpm.setText(_signed_rpm(state.pump.target_rpm))
         self.pump_slider.blockSignals(True)
         self.pump_spin.blockSignals(True)
         self.pump_slider.setValue(round(state.pump.target_rpm))
@@ -2566,16 +2573,18 @@ class MainWindow(QMainWindow):
         self.pump_info.setText(
             "Status: {status}\n"
             "Actual speed: {actual} RPM\n"
-            "Target speed: {target} RPM\n"
-            "Direction: {direction}\n"
+            "Target: {target}\n"
+            "Requested direction: {requested_direction}\n"
+            "Reported direction: {reported_direction}\n"
             "Full speed: {full_speed}\n"
             "Readback: {readback}\n"
             "Tubing: not configured\n"
             "Flow rate: future calibration".format(
                 status=pump_status.lower(),
                 actual=_rpm_value(state.pump.actual_rpm),
-                target=_rpm_value(state.pump.target_rpm),
-                direction=state.pump.direction,
+                target=_signed_rpm(state.pump.target_rpm),
+                requested_direction=_requested_pump_direction(state.pump.target_rpm),
+                reported_direction=_reported_pump_direction(state),
                 full_speed="yes" if state.pump.full_speed else "no",
                 readback=_flag(state.pump.readback, "OK", "No response"),
             )
@@ -2782,6 +2791,27 @@ def _rpm_value(value: float) -> str:
 
 def _rpm(value: float) -> str:
     return f"{_rpm_value(value)} RPM"
+
+
+def _signed_rpm(value: float) -> str:
+    number = round(float(value), 1)
+    if number == 0.0:
+        return "0.0 RPM"
+    return f"{number:+.1f} RPM"
+
+
+def _requested_pump_direction(target_rpm: float) -> str:
+    if target_rpm > 0.0:
+        return "CW"
+    if target_rpm < 0.0:
+        return "CCW"
+    return "STOP"
+
+
+def _reported_pump_direction(state: AppState) -> str:
+    if state.pump.readback is True and state.pump.direction in {"CW", "CCW"}:
+        return state.pump.direction
+    return "Unconfirmed"
 
 
 def _pump_status(state: AppState) -> str:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from microplaite_ui.config import THERMAL_TEST_MAX_TARGET_C
+from microplaite_ui.core.state import normalize_pump_target_rpm
 
 DEFAULT_RECIPE_DIRECTORY = Path.home() / "MicroplaiteData" / "recipes"
 _DEFAULT_EXAMPLE = """{
@@ -144,8 +145,11 @@ class RecipeStore:
             self._raise(source, f"{prefix}: tolerance_c must be non-negative")
         if timeout_s is not None and timeout_s <= 0.0:
             self._raise(source, f"{prefix}: timeout_s must be positive")
-        if rpm is not None and not 0.0 <= rpm <= 100.0:
-            self._raise(source, f"{prefix}: rpm must be between 0 and 100")
+        if rpm is not None:
+            try:
+                rpm = normalize_pump_target_rpm(rpm)
+            except ValueError:
+                self._raise(source, f"{prefix}: rpm must be between -100 and 100")
         if seconds is not None and seconds < 0.0:
             self._raise(source, f"{prefix}: seconds must be non-negative")
 

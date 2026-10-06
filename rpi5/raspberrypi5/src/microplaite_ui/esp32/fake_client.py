@@ -28,6 +28,8 @@ class FakeEsp32Client(Esp32Client):
         self.pump_rpm = 0.0
         self.pump_full_speed = False
         self.pump_readback = True
+        self.pump_bidirectional_supported = True
+        self.pump_direction = "CW"
         self.neopixel_enabled = True
         self.neopixel_brightness_percent = 50
         self._last_tick = time.monotonic()
@@ -74,9 +76,10 @@ class FakeEsp32Client(Esp32Client):
         self.pump_full_speed = False
         return self._message("OK STOP HEATER_OFF")
 
-    def pump_start(self, rpm: float) -> ParsedMessage:
+    def pump_start(self, rpm: float, direction: str = "CW") -> ParsedMessage:
         self.pump_running = True
         self.pump_rpm = max(0.0, min(100.0, round(float(rpm), 1)))
+        self.pump_direction = self._validated_direction(direction)
         self.pump_full_speed = False
         return self._message("OK PUMP_START")
 
@@ -86,13 +89,15 @@ class FakeEsp32Client(Esp32Client):
         self.pump_full_speed = False
         return self._message("OK PUMP_STOP")
 
-    def pump_set_rpm(self, rpm: float) -> ParsedMessage:
+    def pump_set_rpm(self, rpm: float, direction: str = "CW") -> ParsedMessage:
         self.pump_rpm = max(0.0, min(100.0, round(float(rpm), 1))) if self.pump_running else 0.0
+        self.pump_direction = self._validated_direction(direction)
         return self._message("OK PUMP_SET_RPM")
 
     def pump_prime(self) -> ParsedMessage:
         self.pump_running = True
         self.pump_rpm = 100.0
+        self.pump_direction = "CW"
         self.pump_full_speed = True
         return self._message("OK PUMP_PRIME")
 
@@ -141,11 +146,17 @@ class FakeEsp32Client(Esp32Client):
         if name == "STOP":
             return self.stop()
         if name == "PUMP_START" and len(parts) >= 2:
-            return self.pump_start(float(parts[1]))
+            return self.pump_start(
+                float(parts[1]),
+                parts[2].upper() if len(parts) >= 3 else "CW",
+            )
         if name == "PUMP_STOP":
             return self.pump_stop()
         if name == "PUMP_SET_RPM" and len(parts) >= 2:
-            return self.pump_set_rpm(float(parts[1]))
+            return self.pump_set_rpm(
+                float(parts[1]),
+                parts[2].upper() if len(parts) >= 3 else "CW",
+            )
         if name == "PUMP_PRIME":
             return self.pump_prime()
         if name == "PUMP_STATUS":
@@ -195,6 +206,12 @@ class FakeEsp32Client(Esp32Client):
     def _message(self, raw: str) -> ParsedMessage:
         return ParsedMessage(ok=True, raw=raw, lines=[raw], fields=self._fields())
 
+    @staticmethod
+    def _validated_direction(direction: str) -> str:
+        if direction not in {"CW", "CCW"}:
+            raise ValueError("pump direction must be CW or CCW")
+        return direction
+
     def _fields(self) -> dict[str, object]:
         return {
             "temp_c": round(self.temp_c, 2),
@@ -214,6 +231,8 @@ class FakeEsp32Client(Esp32Client):
             "pump_rpm": self.pump_rpm,
             "pump_full_speed": self.pump_full_speed,
             "pump_readback": self.pump_readback,
+            "pump_bidirectional_supported": self.pump_bidirectional_supported,
+            "pump_direction": self.pump_direction,
             "neopixel_enabled": self.neopixel_enabled,
             "neopixel_brightness_percent": self.neopixel_brightness_percent,
         }

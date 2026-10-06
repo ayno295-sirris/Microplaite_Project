@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from microplaite_ui.esp32.client import Esp32Client, Esp32ClientError
 from microplaite_ui.esp32.parser import ParsedMessage
-from microplaite_ui.esp32.v2_client import V2Response, V2Status
+from microplaite_ui.esp32.v2_client import V2Esp32Error, V2Response, V2Status
 from microplaite_ui.esp32.v2_session import SessionState, V2Session
 
 _STATUS_FIELDS = (
@@ -26,6 +26,8 @@ _STATUS_FIELDS = (
     "pump_rpm",
     "pump_full_speed",
     "pump_readback_valid",
+    "pump_bidirectional_supported",
+    "pump_direction",
     "neopixel_enabled",
     "neopixel_brightness",
     "system_state",
@@ -103,14 +105,14 @@ class V2UiClient(Esp32Client):
     def stop(self) -> ParsedMessage:
         return self._command(self.client.stop)
 
-    def pump_start(self, rpm: float) -> ParsedMessage:
-        return self._pump_command(lambda: self.client.pump_start(rpm))
+    def pump_start(self, rpm: float, direction: str | None = None) -> ParsedMessage:
+        return self._pump_command(lambda: self.client.pump_start(rpm, direction))
 
     def pump_stop(self) -> ParsedMessage:
         return self._pump_command(self.client.pump_stop)
 
-    def pump_set_rpm(self, rpm: float) -> ParsedMessage:
-        return self._pump_command(lambda: self.client.pump_set_rpm(rpm))
+    def pump_set_rpm(self, rpm: float, direction: str | None = None) -> ParsedMessage:
+        return self._pump_command(lambda: self.client.pump_set_rpm(rpm, direction))
 
     def pump_prime(self) -> ParsedMessage:
         return self._pump_command(self.client.pump_prime)
@@ -165,7 +167,17 @@ class V2UiClient(Esp32Client):
             self._poll_thread = None
 
     def _command(self, action: Callable[[], V2Response]) -> ParsedMessage:
-        return self._run(lambda: self._response_message(action()))
+        def command() -> ParsedMessage:
+            try:
+                return self._response_message(action())
+            except V2Esp32Error as exc:
+                return ParsedMessage(
+                    ok=False,
+                    error=exc.error,
+                    raw=f"V2 ERR {exc.command or ''}".rstrip(),
+                )
+
+        return self._run(command)
 
     def _pump_command(self, action: Callable[[], V2Response]) -> ParsedMessage:
         with self._poll_command_lock:
@@ -199,15 +211,20 @@ class V2UiClient(Esp32Client):
             for name in _STATUS_FIELDS
             if getattr(status, name) is not None
         }
+        fields["pump_bidirectional_supported"] = status.pump_bidirectional_supported
+        fields["pump_direction"] = status.pump_direction
         fields["session_state"] = self.session_state
         return ParsedMessage(ok=True, is_status=True, fields=fields, raw="V2 STATUS")
 
     def _response_message(self, response: V2Response) -> ParsedMessage:
+        status = V2Status.from_payload(response.payload)
         fields = {
-            name: response.payload[name]
+            name: getattr(status, name)
             for name in _STATUS_FIELDS
-            if name in response.payload
+            if getattr(status, name) is not None
         }
+        if response.command == "PUMP_STATUS":
+            fields["pump_direction"] = status.pump_direction
         fields["session_state"] = self.session_state
         raw = f"V2 {response.command or response.response_type}"
         return ParsedMessage(ok=True, fields=fields, raw=raw)

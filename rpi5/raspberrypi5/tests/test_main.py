@@ -1801,19 +1801,70 @@ def test_pump_page_large_step_buttons_use_fine_steps_below_10_rpm() -> None:
     window._nudge_pump_target(1)
     assert window.controller.state.pump.target_rpm == 9.9
     assert window.pump_spin.value() == 9.9
-    assert window.pump_target_rpm.text() == "9.9 RPM"
+    assert window.pump_target_rpm.text() == "+9.9 RPM"
 
     window._nudge_pump_target(1)
     assert window.controller.state.pump.target_rpm == 10.0
-    assert window.pump_target_rpm.text() == "10 RPM"
+    assert window.pump_target_rpm.text() == "+10.0 RPM"
 
     window._nudge_pump_target(1)
     assert window.controller.state.pump.target_rpm == 11.0
-    assert window.pump_target_rpm.text() == "11 RPM"
+    assert window.pump_target_rpm.text() == "+11.0 RPM"
 
     window._set_pump_target_rpm(10.0)
     window._nudge_pump_target(-1)
     assert window.controller.state.pump.target_rpm == 9.9
+
+
+def test_pump_page_accepts_full_signed_range() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+
+    assert window.pump_slider.minimum() == -100
+    assert window.pump_slider.maximum() == 100
+    assert window.pump_spin.minimum() == -100.0
+    assert window.pump_spin.maximum() == 100.0
+    assert window.pump_spin.singleStep() == 0.1
+
+    window._set_pump_target_rpm(-10.0)
+    app.processEvents()
+
+    assert window.controller.state.pump.target_rpm == -10.0
+    assert window.pump_target_rpm.text() == "-10.0 RPM"
+    assert "Target: -10.0 RPM" in window.pump_info.text()
+    assert "Requested direction: CCW" in window.pump_info.text()
+
+
+def test_pump_page_displays_only_confirmed_reported_direction() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window._set_pump_target_rpm(-10.0)
+    window._start_pump()
+    app.processEvents()
+
+    assert window.controller.state.pump.direction == "CCW"
+    assert "Reported direction: CCW" in window.pump_info.text()
+
+    window.controller.state.pump.readback = False
+    window._render()
+
+    assert "Reported direction: Unconfirmed" in window.pump_info.text()
+
+
+def test_fake_pump_models_bidirectional_capability_and_direction() -> None:
+    client = FakeEsp32Client()
+
+    start = client.pump_start(10.0, "CCW")
+    update = client.pump_set_rpm(4.0, "CCW")
+    prime = client.pump_prime()
+
+    assert start.fields["pump_bidirectional_supported"] is True
+    assert start.fields["pump_direction"] == "CCW"
+    assert update.fields["pump_rpm"] == 4.0
+    assert update.fields["pump_direction"] == "CCW"
+    assert prime.fields["pump_direction"] == "CW"
 
 
 def test_pump_page_uses_large_step_buttons() -> None:

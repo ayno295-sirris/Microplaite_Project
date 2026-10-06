@@ -19,8 +19,8 @@ def test_loads_valid_recipe_with_all_supported_actions(tmp_path: Path) -> None:
                     {"action": "SET_TEMPERATURE", "target_c": 44.3},
                     {"action": "HEATER_PID_ON"},
                     {"action": "HEATER_OFF"},
-                    {"action": "PUMP_START", "rpm": 3.0},
-                    {"action": "PUMP_SET_RPM", "rpm": 4.0},
+                    {"action": "PUMP_START", "rpm": -3.0},
+                    {"action": "PUMP_SET_RPM", "rpm": -4.0},
                     {"action": "PUMP_STOP"},
                     {"action": "PUMP_PRIME"},
                     {"action": "WAIT", "seconds": 0.5},
@@ -53,6 +53,8 @@ def test_loads_valid_recipe_with_all_supported_actions(tmp_path: Path) -> None:
         "NEOPIXEL",
     )
     assert recipe.steps[0].target_c == 44.3
+    assert recipe.steps[3].rpm == -3.0
+    assert recipe.steps[4].rpm == -4.0
     assert recipe.steps[-1].enabled is True
     assert recipe.steps[-1].brightness == 35
 
@@ -106,6 +108,10 @@ def test_loads_valid_recipe_with_all_supported_actions(tmp_path: Path) -> None:
         ),
         (
             {"name": "Bad", "steps": [{"action": "PUMP_START", "rpm": 100.1}]},
+            "must be",
+        ),
+        (
+            {"name": "Bad", "steps": [{"action": "PUMP_START", "rpm": -100.1}]},
             "must be",
         ),
         (
@@ -185,6 +191,22 @@ def test_rejects_malformed_json(tmp_path: Path) -> None:
 
     with pytest.raises(RecipeValidationError, match="invalid JSON"):
         RecipeStore(tmp_path).load(path)
+
+
+@pytest.mark.parametrize(
+    ("rpm", "expected"),
+    [(-100.0, -100.0), (-0.14, -0.1), (-0.0, 0.0), (0.1, 0.1), (100.0, 100.0)],
+)
+def test_recipe_normalizes_signed_pump_rpm(tmp_path: Path, rpm: float, expected: float) -> None:
+    path = tmp_path / "signed.json"
+    path.write_text(
+        json.dumps({"name": "Signed", "steps": [{"action": "PUMP_START", "rpm": rpm}]}),
+        encoding="utf-8",
+    )
+
+    recipe = RecipeStore(tmp_path).load(path)
+
+    assert recipe.steps[0].rpm == expected
 
 
 def test_list_files_creates_directory_and_default_example(tmp_path: Path) -> None:
