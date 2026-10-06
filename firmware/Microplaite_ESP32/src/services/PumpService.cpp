@@ -11,14 +11,22 @@ void PumpService::begin()
     Serial1.begin(PUMP_SERIAL_BAUD, SERIAL_8E1, PIN_PUMP_RS485_RX, PIN_PUMP_RS485_TX);
 }
 
-bool PumpService::start(float rpm, AppState& state)
+const char* PumpService::start(float rpm, AppState& state, bool clockwise)
 {
-    return writePump(rpm, true, false, state);
+    rpm = clampRpm(rpm);
+    if (rpm == 0.0f) return stop(state) ? nullptr : "PUMP_WRITE_FAILED";
+    const char* error = directionError(clockwise, state);
+    if (error) return error;
+    return writePump(rpm, true, false, clockwise, state) ? nullptr : "PUMP_WRITE_FAILED";
 }
 
-bool PumpService::setRpm(float rpm, AppState& state)
+const char* PumpService::setRpm(float rpm, AppState& state, bool clockwise)
 {
-    return writePump(rpm, state.pumpRunning, state.pumpFullSpeed, state);
+    rpm = clampRpm(rpm);
+    if (rpm == 0.0f) return stop(state) ? nullptr : "PUMP_WRITE_FAILED";
+    const char* error = directionError(clockwise, state);
+    if (error) return error;
+    return writePump(rpm, state.pumpRunning, false, clockwise, state) ? nullptr : "PUMP_WRITE_FAILED";
 }
 
 bool PumpService::stop(AppState& state)
@@ -26,16 +34,18 @@ bool PumpService::stop(AppState& state)
     for (int pending = Serial1.available(); pending > 0; --pending) {
         Serial1.read();
     }
-    if (!writePump(0.0f, false, false, state)) {
+    if (!writePump(0.0f, false, false, state.pumpCommandedClockwise, state)) {
         return false;
     }
     readStatus(state, RESPONSE_TIMEOUT_MS, true);
     return true; // WJ sent; pumpReadbackValid qualifies the controller state.
 }
 
-bool PumpService::prime(AppState& state)
+const char* PumpService::prime(AppState& state)
 {
-    return writePump(PUMP_MAX_RPM, true, true, state);
+    const char* error = directionError(true, state);
+    if (error) return error;
+    return writePump(PUMP_MAX_RPM, true, true, true, state) ? nullptr : "PUMP_WRITE_FAILED";
 }
 
 bool PumpService::readStatus(AppState& state, uint32_t timeoutMs)
@@ -102,6 +112,7 @@ bool PumpService::readStatus(AppState& state, uint32_t timeoutMs, bool waitForWr
             state.pumpRunning = status.running;
             state.pumpRpm = status.rpm;
             state.pumpFullSpeed = status.fullSpeed;
+            state.pumpClockwise = status.clockwise;
             state.pumpReadbackValid = true;
             return true;
         }
@@ -109,12 +120,21 @@ bool PumpService::readStatus(AppState& state, uint32_t timeoutMs, bool waitForWr
     return false;
 }
 
-bool PumpService::writePump(float rpm, bool run, bool fullSpeed, AppState& state)
+const char* PumpService::directionError(bool clockwise, const AppState& state) const
+{
+    const bool commandChange = clockwise != state.pumpCommandedClockwise;
+    const bool reportedChange = state.pumpReadbackValid && clockwise != state.pumpClockwise;
+    if (state.pumpRunning && (commandChange || reportedChange)) return "PUMP_DIRECTION_CHANGE_REQUIRES_STOP";
+    if (commandChange && !state.pumpReadbackValid) return "PUMP_STOP_NOT_CONFIRMED";
+    return nullptr;
+}
+
+bool PumpService::writePump(float rpm, bool run, bool fullSpeed, bool clockwise, AppState& state)
 {
     state.pumpReadbackValid = false;
     rpm = clampRpm(rpm);
     uint8_t frame[LongerProtocol::MAX_FRAME_SIZE] = {0};
-    const size_t length = LongerProtocol::buildWriteFrame(PUMP_ADDRESS, rpm, run, fullSpeed, frame, sizeof(frame));
+    const size_t length = LongerProtocol::buildWriteFrame(PUMP_ADDRESS, rpm, run, fullSpeed, clockwise, frame, sizeof(frame));
     if (length == 0) {
         return false;
     }
@@ -126,6 +146,7 @@ bool PumpService::writePump(float rpm, bool run, bool fullSpeed, AppState& state
     state.pumpRunning = run;
     state.pumpRpm = run ? rpm : 0.0f;
     state.pumpFullSpeed = run && fullSpeed;
+    state.pumpCommandedClockwise = clockwise;
     return true;
 }
 

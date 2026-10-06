@@ -27,6 +27,8 @@ struct AppState {
     float pumpRpm = 0.0f;
     bool pumpFullSpeed = false;
     bool pumpReadbackValid = false; // Only a valid RJ confirms the pump fields.
+    bool pumpCommandedClockwise = true;
+    bool pumpClockwise = true; // Controller-reported direction, qualified by pumpReadbackValid.
 
     bool neopixelEnabled = false;
     uint8_t neopixelBrightnessPercent = 0;

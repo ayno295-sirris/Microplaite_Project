@@ -23,6 +23,18 @@ void printJsonNumber(Print& out, float value, int decimals)
     snprintf(buffer, sizeof(buffer), "%.*f", decimals, static_cast<double>(value));
     out.print(buffer);
 }
+
+const char* parsePumpDirection(const cJSON* request, bool& clockwise)
+{
+    clockwise = true;
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(request, "direction");
+    if (!value) return nullptr;
+    if (!cJSON_IsString(value)) return "BAD_DIRECTION";
+    if (strcmp(value->valuestring, "CW") == 0) return nullptr;
+    if (strcmp(value->valuestring, "CCW") != 0) return "BAD_DIRECTION";
+    clockwise = false;
+    return nullptr;
+}
 }
 
 CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel, SupervisionService& supervision)
@@ -163,14 +175,17 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
 
     if (strcmp(cmd, "PUMP_START") == 0 || strcmp(cmd, "PUMP_SET_RPM") == 0) {
         float rpm = 0;
+        bool clockwise = true;
         error = JsonProtocol::number(request.get(), "rpm", 0, PUMP_MAX_RPM, rpm);
+        if (!error) error = parsePumpDirection(request.get(), clockwise);
         if (!error) error = _supervision.activationError(millis());
         if (error) {
             sendError(id, cmd, error, out);
             return;
         }
-        const bool written = strcmp(cmd, "PUMP_START") == 0 ? _pump.start(rpm, _state) : _pump.setRpm(rpm, _state);
-        sendPumpResult(id, cmd, written, out);
+        error = strcmp(cmd, "PUMP_START") == 0 ? _pump.start(rpm, _state, clockwise) : _pump.setRpm(rpm, _state, clockwise);
+        if (error) sendError(id, cmd, error, out);
+        else sendPumpResult(id, cmd, true, out);
         return;
     }
 
@@ -186,8 +201,9 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
             sendError(id, cmd, error, out);
             return;
         }
-        const bool written = _pump.prime(_state);
-        sendPumpResult(id, cmd, written, out);
+        error = _pump.prime(_state);
+        if (error) sendError(id, cmd, error, out);
+        else sendPumpResult(id, cmd, true, out);
         return;
     }
 
@@ -608,6 +624,7 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(",\"error_latched\":");
     out.print(_state.errorLatched ? "true" : "false");
     printJsonPumpFields(out);
+    out.print(",\"pump_bidirectional_supported\":true");
     out.print(",\"neopixel_enabled\":");
     out.print(_state.neopixelEnabled ? "true" : "false");
     out.print(",\"neopixel_brightness\":");
@@ -971,8 +988,10 @@ void CommandDispatcher::sendTextPumpStart(const char* args, Print& out)
         return;
     }
 
-    if (!_pump.start(rpm, _state)) {
-        out.println("ERR PUMP_WRITE_FAILED");
+    const char* error = _pump.start(rpm, _state);
+    if (error) {
+        out.print("ERR ");
+        out.println(error);
         return;
     }
 
@@ -1001,8 +1020,10 @@ void CommandDispatcher::sendTextPumpSetRpm(const char* args, Print& out)
         return;
     }
 
-    if (!_pump.setRpm(rpm, _state)) {
-        out.println("ERR PUMP_WRITE_FAILED");
+    const char* error = _pump.setRpm(rpm, _state);
+    if (error) {
+        out.print("ERR ");
+        out.println(error);
         return;
     }
 
@@ -1013,8 +1034,10 @@ void CommandDispatcher::sendTextPumpSetRpm(const char* args, Print& out)
 
 void CommandDispatcher::sendTextPumpPrime(Print& out)
 {
-    if (!_pump.prime(_state)) {
-        out.println("ERR PUMP_WRITE_FAILED");
+    const char* error = _pump.prime(_state);
+    if (error) {
+        out.print("ERR ");
+        out.println(error);
         return;
     }
 
@@ -1121,6 +1144,9 @@ void CommandDispatcher::printJsonPumpFields(Print& out) const
     out.print(_state.pumpFullSpeed ? "true" : "false");
     out.print(",\"pump_readback_valid\":");
     out.print(_state.pumpReadbackValid ? "true" : "false");
+    out.print(",\"pump_direction\":");
+    if (!_state.pumpReadbackValid) out.print("null");
+    else out.print(_state.pumpClockwise ? "\"CW\"" : "\"CCW\"");
 }
 
 void CommandDispatcher::sendPumpResult(long id, const char* cmd, bool written, Print& out) const

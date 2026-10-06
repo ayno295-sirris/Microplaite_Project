@@ -106,7 +106,7 @@ uint16_t speedTenths(float rpm)
 
 namespace LongerProtocol {
 
-size_t buildWriteFrame(uint8_t addr, float rpm, bool run, bool fullSpeed, uint8_t* out, size_t outSize)
+size_t buildWriteFrame(uint8_t addr, float rpm, bool run, bool fullSpeed, bool clockwise, uint8_t* out, size_t outSize)
 {
     const uint16_t speed = speedTenths(rpm);
     uint8_t pdu[] = {
@@ -115,7 +115,7 @@ size_t buildWriteFrame(uint8_t addr, float rpm, bool run, bool fullSpeed, uint8_
         static_cast<uint8_t>((speed >> 8) & 0xFF),
         static_cast<uint8_t>(speed & 0xFF),
         static_cast<uint8_t>((run ? 0x01 : 0x00) | (fullSpeed ? 0x02 : 0x00)),
-        0x01,
+        static_cast<uint8_t>(clockwise ? 0x01 : 0x00),
     };
     return buildFrame(addr, pdu, sizeof(pdu), out, outSize);
 }
@@ -160,6 +160,7 @@ bool parseStatusFrame(const uint8_t* frame, size_t frameSize, uint8_t addr, Pump
     status.rpm = speed / 10.0f;
     status.running = (body[6] & 0x01) != 0;
     status.fullSpeed = (body[6] & 0x02) != 0;
+    status.clockwise = (body[7] & 0x01) != 0;
     return true;
 }
 
@@ -167,7 +168,7 @@ bool selfCheck()
 {
     uint8_t frame[MAX_FRAME_SIZE] = {0};
     const uint8_t expected[] = {0xE9, 0x01, 0x06, 0x57, 0x4A, 0x00, 0x64, 0x01, 0x01, 0x7E};
-    const size_t length = buildWriteFrame(1, 10.0f, true, false, frame, sizeof(frame));
+    const size_t length = buildWriteFrame(1, 10.0f, true, false, true, frame, sizeof(frame));
     return length == sizeof(expected) && memcmp(frame, expected, sizeof(expected)) == 0;
 }
 
