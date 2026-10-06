@@ -7,7 +7,14 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt
-from PySide6.QtGui import QImage, QMouseEvent
+from PySide6.QtGui import (
+    QEventPoint,
+    QImage,
+    QInputDevice,
+    QMouseEvent,
+    QPointingDevice,
+    QTouchEvent,
+)
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from microplaite_ui.config import DEFAULT_TARGET_C, SCREEN_HEIGHT, SCREEN_WIDTH
@@ -61,6 +68,118 @@ def test_maintenance_title_long_press_emits_once() -> None:
     _send_mouse_event(title, QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
 
     assert emissions == [True]
+
+
+def test_maintenance_title_touch_long_press_emits_once() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.resize(300, 60)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchBegin,
+        QEventPoint.State.Pressed,
+        QPointF(20.0, 20.0),
+    )
+    _process_events_for(app, 0.04)
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchEnd,
+        QEventPoint.State.Released,
+        QPointF(20.0, 20.0),
+    )
+
+    assert emissions == [True]
+
+
+def test_maintenance_title_opts_in_to_touch_events() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+
+    assert title.testAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents) is True
+
+
+def test_maintenance_title_touch_short_tap_does_nothing() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.resize(300, 60)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchBegin,
+        QEventPoint.State.Pressed,
+        QPointF(20.0, 20.0),
+    )
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchEnd,
+        QEventPoint.State.Released,
+        QPointF(20.0, 20.0),
+    )
+    _process_events_for(app, 0.04)
+
+    assert emissions == []
+
+
+def test_maintenance_title_touch_leaving_area_cancels_hold() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.resize(300, 60)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchBegin,
+        QEventPoint.State.Pressed,
+        QPointF(20.0, 20.0),
+    )
+    _send_touch_event(
+        title,
+        QEvent.Type.TouchUpdate,
+        QEventPoint.State.Updated,
+        QPointF(320.0, 20.0),
+    )
+    _process_events_for(app, 0.04)
+
+    assert emissions == []
+
+
+def test_maintenance_title_touch_release_allows_another_long_press() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    title = main_window_module.MaintenanceTitleLabel("Microplaite Control")
+    title._hold_timer.setInterval(25)
+    title.resize(300, 60)
+    title.show()
+    emissions: list[bool] = []
+    title.maintenance_requested.connect(lambda: emissions.append(True))
+
+    for _ in range(2):
+        _send_touch_event(
+            title,
+            QEvent.Type.TouchBegin,
+            QEventPoint.State.Pressed,
+            QPointF(20.0, 20.0),
+        )
+        _process_events_for(app, 0.04)
+        _send_touch_event(
+            title,
+            QEvent.Type.TouchEnd,
+            QEventPoint.State.Released,
+            QPointF(20.0, 20.0),
+        )
+
+    assert emissions == [True, True]
 
 
 def test_main_title_long_press_opens_maintenance_dialog() -> None:
@@ -198,6 +317,37 @@ def _send_mouse_event(
         Qt.MouseButton.LeftButton,
         buttons,
         Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, event)
+
+
+def _send_touch_event(
+    widget: QLabel,
+    event_type: QEvent.Type,
+    state: QEventPoint.State,
+    position: QPointF,
+) -> None:
+    device = QPointingDevice(
+        "test touchscreen",
+        1,
+        QInputDevice.DeviceType.TouchScreen,
+        QPointingDevice.PointerType.Finger,
+        QInputDevice.Capability.Position,
+        1,
+        0,
+    )
+    global_position = QPointF(widget.mapToGlobal(position.toPoint()))
+    point = QEventPoint(
+        0,
+        state,
+        position,
+        global_position,
+    )
+    event = QTouchEvent(
+        event_type,
+        device,
+        Qt.KeyboardModifier.NoModifier,
+        [point],
     )
     QApplication.sendEvent(widget, event)
 

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import QCoreApplication, QPoint, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import (
     QCamera,
@@ -83,23 +83,54 @@ class MaintenanceTitleLabel(QLabel):
 
     def __init__(self, text: str) -> None:
         super().__init__(text)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self._hold_source: str | None = None
         self._hold_timer = QTimer(self)
         self._hold_timer.setSingleShot(True)
         self._hold_timer.setInterval(self.HOLD_DURATION_MS)
         self._hold_timer.timeout.connect(self.maintenance_requested.emit)
 
+    def event(self, event) -> bool:
+        event_type = event.type()
+        if event_type == QEvent.Type.TouchBegin:
+            self._start_hold("touch")
+        elif event_type == QEvent.Type.TouchUpdate:
+            points = event.points()
+            if not points or not self.rect().contains(
+                self.mapFromGlobal(points[0].globalPosition().toPoint())
+            ):
+                self._end_hold("touch")
+        elif event_type in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            self._end_hold("touch")
+        else:
+            return super().event(event)
+        event.accept()
+        return True
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._hold_timer.start()
+            self._start_hold("mouse")
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        self._hold_timer.stop()
+        self._end_hold("mouse")
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._hold_timer.stop()
+        self._end_hold("mouse")
         super().leaveEvent(event)
+
+    def _start_hold(self, source: str) -> None:
+        if self._hold_source is not None:
+            return
+        self._hold_source = source
+        self._hold_timer.start()
+
+    def _end_hold(self, source: str) -> None:
+        if self._hold_source != source:
+            return
+        self._hold_timer.stop()
+        self._hold_source = None
 
 
 class ZoomableCameraView(QLabel):
