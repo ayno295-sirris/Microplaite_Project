@@ -65,6 +65,7 @@ from microplaite_ui.services.storage import (
     unique_path,
 )
 from microplaite_ui.services.timelapse import TimelapseService, TimelapseSettings
+from microplaite_ui.ui.generated.ui_recipes_page import Ui_RecipesPage
 from microplaite_ui.ui.styles import QSS
 
 
@@ -599,65 +600,29 @@ class MainWindow(QMainWindow):
         return root
 
     def _build_recipes_page(self) -> QWidget:
-        root, layout = self._page_root()
-        layout.addWidget(self._detail_header("Recipes"))
+        root = QWidget()
+        form = Ui_RecipesPage()
+        form.setupUi(root)
+        self._recipes_form = form
 
-        card = self._plain_card("card", width=900, height=430)
-        box = QVBoxLayout(card)
-        box.setContentsMargins(24, 20, 24, 20)
-        box.setSpacing(12)
-        box.addWidget(self._caption_large("Recipe selection"))
+        self.recipe_combo = form.recipe_combo
+        self.recipe_name_label = form.recipe_name_label
+        self.recipe_step_label = form.recipe_step_label
+        self.recipe_progress_label = form.recipe_progress_label
+        self.recipe_state_label = form.recipe_state_label
+        self.recipe_error_label = form.recipe_error_label
+        self.recipe_start_button = form.recipe_start_button
+        self.recipe_stop_button = form.recipe_stop_button
 
-        self.recipe_combo = QComboBox()
-        self.recipe_combo.setObjectName("touchCombo")
-        self.recipe_combo.setFixedHeight(48)
-        box.addWidget(self.recipe_combo)
-
-        self.recipe_name_label = QLabel("-")
-        self.recipe_name_label.setObjectName("mediumValue")
-        self.recipe_step_label = QLabel("-")
-        self.recipe_step_label.setObjectName("footerValue")
-        self.recipe_progress_label = QLabel("step 0 / 0")
-        self.recipe_progress_label.setObjectName("footerValue")
-        self.recipe_state_label = QLabel("Stopped")
-        self.recipe_state_label.setObjectName("footerValue")
-        self.recipe_error_label = QLabel("")
-        self.recipe_error_label.setObjectName("infoText")
-        self.recipe_error_label.setWordWrap(True)
-        for title, value in (
-            ("Name", self.recipe_name_label),
-            ("Current step", self.recipe_step_label),
-            ("Progress", self.recipe_progress_label),
-            ("State", self.recipe_state_label),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(self._small_text(title))
-            row.addWidget(value, 1)
-            box.addLayout(row)
-        box.addWidget(self.recipe_error_label)
-        box.addStretch()
-
-        controls = QHBoxLayout()
-        self.recipe_start_button = self._button(
-            "START RECIPE",
-            "primaryButton",
-            220,
-            56,
-        )
-        self.recipe_stop_button = self._button(
-            "STOP RECIPE",
-            "stopButtonSmall",
-            220,
-            56,
-        )
+        form.recipes_back_button.clicked.connect(self.show_home_page)
+        form.recipes_reconnect_button.clicked.connect(self._reconnect)
+        form.recipes_global_stop_button.clicked.connect(self._stop)
         self.recipe_start_button.clicked.connect(self._start_recipe)
         self.recipe_stop_button.clicked.connect(self._stop_recipe)
-        controls.addWidget(self.recipe_start_button)
-        controls.addWidget(self.recipe_stop_button)
-        controls.addStretch()
-        box.addLayout(controls)
-        layout.addWidget(card, 0, Qt.AlignHCenter)
-        layout.addStretch()
+
+        self._port_labels.append(form.recipes_port_label)
+        self._status_pills.append(form.recipes_status_label)
+        self._reconnect_buttons.append(form.recipes_reconnect_button)
 
         for path in self._recipe_store.list_files():
             self.recipe_combo.addItem(path.name, path)

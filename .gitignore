@@ -24,6 +24,7 @@ build/
 # Raspberry Pi project runtime data
 logs/
 **/logs/
+rpi5/raspberrypi5/src/microplaite_ui/ui/generated/ui_*.py
 
 # PlatformIO
 .pio/

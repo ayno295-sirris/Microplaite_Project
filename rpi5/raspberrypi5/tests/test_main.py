@@ -840,6 +840,40 @@ def test_recipes_page_discovers_files_and_reports_invalid_selection(tmp_path: Pa
     assert window.recipe_start_button.isEnabled() is False
 
 
+def test_recipes_designer_page_preserves_navigation_and_global_stop(tmp_path: Path) -> None:
+    client = RecordingClient()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(
+        AppController(client),
+        recipe_store=RecipeStore(tmp_path),
+    )
+    window.timer.stop()
+    window.show()
+    app.processEvents()
+
+    back_button = window.recipes_page.findChild(QPushButton, "recipes_back_button")
+    reconnect_button = window.recipes_page.findChild(
+        QPushButton,
+        "recipes_reconnect_button",
+    )
+    stop_button = window.recipes_page.findChild(
+        QPushButton,
+        "recipes_global_stop_button",
+    )
+
+    assert back_button is not None
+    assert reconnect_button is not None
+    assert stop_button is not None
+
+    window.show_recipes_page()
+    back_button.click()
+    assert window.pages.currentIndex() == window.PAGE_HOME
+
+    client.commands.clear()
+    stop_button.click()
+    assert "STOP" in client.commands
+
+
 def test_recipe_start_renders_progress_and_disables_manual_activation(
     tmp_path: Path,
 ) -> None:

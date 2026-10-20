@@ -2,7 +2,8 @@
 
 QSS = """
 QMainWindow,
-QWidget#appRoot {
+QWidget#appRoot,
+QWidget#RecipesPage {
     background: #f0f5fa;
     color: #0f1a29;
     font-family: Inter, Segoe UI, Arial, sans-serif;
@@ -12,19 +13,26 @@ QLabel {
     color: #0f1a29;
 }
 
-QLabel#pageTitle {
+QLabel#pageTitle,
+QLabel#recipes_title_label {
     font-size: 28px;
     font-weight: 800;
 }
 
 QLabel#portLabel,
+QLabel#recipes_port_label,
 QLabel#caption,
 QLabel#smallText,
+QLabel#recipe_name_caption,
+QLabel#recipe_step_caption,
+QLabel#recipe_progress_caption,
+QLabel#recipe_state_caption,
 QLabel#bottomStatus {
     color: #4d5e73;
 }
 
-QLabel#portLabel {
+QLabel#portLabel,
+QLabel#recipes_port_label {
     font-size: 16px;
 }
 
@@ -32,7 +40,8 @@ QLabel#caption {
     font-size: 16px;
 }
 
-QLabel#captionLarge {
+QLabel#captionLarge,
+QLabel#recipe_selection_caption {
     color: #4d5e73;
     font-size: 20px;
 }
@@ -72,7 +81,8 @@ QLabel#hugeValue {
     font-weight: 900;
 }
 
-QLabel#mediumValue {
+QLabel#mediumValue,
+QLabel#recipe_name_label {
     font-size: 30px;
     font-weight: 900;
 }
@@ -82,12 +92,16 @@ QLabel#metricValue {
     font-weight: 900;
 }
 
-QLabel#footerValue {
+QLabel#footerValue,
+QLabel#recipe_step_label,
+QLabel#recipe_progress_label,
+QLabel#recipe_state_label {
     font-size: 20px;
     font-weight: 900;
 }
 
-QLabel#infoText {
+QLabel#infoText,
+QLabel#recipe_error_label {
     font-size: 18px;
     color: #0f1a29;
 }
@@ -123,6 +137,7 @@ QLabel#previewBadge {
 }
 
 QFrame#card,
+QFrame#recipes_card,
 QFrame#temperatureCard,
 QFrame#thermalCard,
 QFrame#pumpCard,
@@ -211,12 +226,14 @@ QPushButton {
     font-weight: 900;
 }
 
-QPushButton#primaryButton {
+QPushButton#primaryButton,
+QPushButton#recipe_start_button {
     background: #216ee5;
     font-size: 21px;
 }
 
-QPushButton#primaryButton:hover {
+QPushButton#primaryButton:hover,
+QPushButton#recipe_start_button:hover {
     background: #155fd2;
 }
 
@@ -225,28 +242,36 @@ QPushButton#stopButton {
     font-size: 38px;
 }
 
-QPushButton#stopButtonCompact {
+QPushButton#stopButtonCompact,
+QPushButton#recipes_global_stop_button {
     background: #d1142e;
     font-size: 25px;
 }
 
-QPushButton#stopButtonSmall {
+QPushButton#stopButtonSmall,
+QPushButton#recipe_stop_button {
     background: #d1142e;
     font-size: 20px;
 }
 
 QPushButton#stopButton:hover,
 QPushButton#stopButtonCompact:hover,
-QPushButton#stopButtonSmall:hover {
+QPushButton#stopButtonSmall:hover,
+QPushButton#recipes_global_stop_button:hover,
+QPushButton#recipe_stop_button:hover {
     background: #b40f26;
 }
 
-QPushButton#secondaryButton {
+QPushButton#secondaryButton,
+QPushButton#recipes_back_button,
+QPushButton#recipes_reconnect_button {
     background: #4a5e73;
     font-size: 17px;
 }
 
-QPushButton#secondaryButton:hover {
+QPushButton#secondaryButton:hover,
+QPushButton#recipes_back_button:hover,
+QPushButton#recipes_reconnect_button:hover {
     background: #3c5065;
 }
 
