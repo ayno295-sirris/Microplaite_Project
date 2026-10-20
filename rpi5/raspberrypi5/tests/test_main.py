@@ -1938,6 +1938,41 @@ def test_pump_page_uses_large_step_buttons() -> None:
     assert window.pump_plus_button.height() >= 70
 
 
+def test_pump_page_uses_single_wide_touch_first_control_card() -> None:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.show_pump_page()
+    window.show()
+    app.processEvents()
+
+    assert window.pump_control_card.width() >= 1100
+    assert window.pump_slider.width() >= 900
+    assert window.pump_slider.height() >= 48
+    assert window.pump_target_rpm.objectName() == "hugeValue"
+    assert window.pump_start_button.width() >= 200
+    assert window.pump_stop_button.width() >= 200
+    assert window.pump_start_button.height() >= 68
+    assert window.pump_stop_button.height() >= 68
+
+
+def test_pump_page_keeps_critical_status_and_removes_future_placeholders() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    window.controller.state.last_error = "PUMP TEST ERROR"
+    window._render()
+
+    status = window.pump_info.text()
+    page_text = "\n".join(label.text() for label in window.pump_page.findChildren(QLabel))
+    assert "Requested direction:" in status
+    assert "Reported direction:" in status
+    assert "Readback:" in status
+    assert "PUMP TEST ERROR" in status
+    assert "Tubing:" not in page_text
+    assert "future calibration" not in page_text
+
+
 def test_camera_page_contains_live_controls_and_full_preview() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow(AppController(FakeEsp32Client()))

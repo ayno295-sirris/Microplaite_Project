@@ -781,44 +781,56 @@ class MainWindow(QMainWindow):
         root, layout = self._page_root()
         layout.addWidget(self._detail_header("Peristaltic pump"))
 
-        body = QHBoxLayout()
-        body.setSpacing(20)
-        main = self._plain_card("card", width=700, height=430)
-        box = QVBoxLayout(main)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.addWidget(self._caption_large("Pump control"))
+        self.pump_control_card = self._plain_card("card", width=1180, height=490)
+        box = QVBoxLayout(self.pump_control_card)
+        box.setContentsMargins(30, 20, 30, 22)
+        box.setSpacing(10)
+
         status = QHBoxLayout()
+        status.addWidget(self._caption_large("Pump control"))
+        status.addSpacing(18)
         self.pump_dot = self._status_dot()
         self.pump_status = self._small_text("Stopped")
         status.addWidget(self.pump_dot)
         status.addWidget(self.pump_status)
         status.addStretch()
+        status.addWidget(self._small_text("Reported speed"))
         box.addLayout(status)
-        self.pump_actual_rpm = QLabel("0 RPM")
-        self.pump_actual_rpm.setObjectName("hugeValue")
-        box.addWidget(self.pump_actual_rpm)
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(self._caption_large("Rotation speed setpoint"))
-        speed_row.addStretch()
+
+        values = QHBoxLayout()
+        values.setSpacing(18)
+        target_box = QVBoxLayout()
+        target_box.setSpacing(0)
+        target_box.addWidget(self._small_text("SIGNED RPM SETPOINT"))
         self.pump_target_rpm = QLabel("+50.0 RPM")
-        self.pump_target_rpm.setObjectName("mediumValue")
-        speed_row.addWidget(self.pump_target_rpm)
-        box.addLayout(speed_row)
+        self.pump_target_rpm.setObjectName("hugeValue")
+        target_box.addWidget(self.pump_target_rpm)
+        values.addLayout(target_box, 1)
+        self.pump_actual_rpm = QLabel("0 RPM")
+        self.pump_target_rpm.setObjectName("hugeValue")
+        self.pump_actual_rpm.setObjectName("mediumValue")
+        self.pump_actual_rpm.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        values.addWidget(self.pump_actual_rpm)
+        box.addLayout(values)
+
         self.pump_slider = QSlider(Qt.Horizontal)
         self.pump_slider.setObjectName("rpmSlider")
         self.pump_slider.setRange(-100, 100)
         self.pump_slider.setValue(50)
+        self.pump_slider.setMinimumHeight(52)
+        self.pump_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.pump_slider.sliderPressed.connect(self._begin_pump_slider_gesture)
         self.pump_slider.valueChanged.connect(self._pump_slider_value_changed)
         self.pump_slider.sliderReleased.connect(self._end_pump_slider_gesture)
         box.addWidget(self.pump_slider)
 
-        rpm_control = QHBoxLayout()
-        rpm_control.setSpacing(12)
-        self.pump_minus_button = self._button("-", "rpmStepButton", 98, 74)
-        self.pump_plus_button = self._button("+", "rpmStepButton", 98, 74)
+        actions = QHBoxLayout()
+        actions.setSpacing(14)
+        self.pump_minus_button = self._button("-", "rpmStepButton", 104, 74)
+        self.pump_plus_button = self._button("+", "rpmStepButton", 104, 74)
         self.pump_spin = QDoubleSpinBox()
         self.pump_spin.setObjectName("rpmSpinBox")
+        self.pump_spin.setFixedSize(230, 74)
         self.pump_spin.setRange(-100.0, 100.0)
         self.pump_spin.setDecimals(1)
         self.pump_spin.setSingleStep(0.1)
@@ -828,36 +840,30 @@ class MainWindow(QMainWindow):
         self.pump_spin.editingFinished.connect(self._commit_pump_spin)
         self.pump_minus_button.clicked.connect(lambda: self._nudge_pump_target(-1))
         self.pump_plus_button.clicked.connect(lambda: self._nudge_pump_target(1))
-        rpm_control.addWidget(self.pump_minus_button)
-        rpm_control.addWidget(self.pump_spin, 1)
-        rpm_control.addWidget(self.pump_plus_button)
-        box.addLayout(rpm_control)
-        controls = QHBoxLayout()
+        actions.addWidget(self.pump_minus_button)
+        actions.addWidget(self.pump_spin)
+        actions.addWidget(self.pump_plus_button)
+        actions.addSpacing(20)
         for attribute, text, name, handler in (
             ("pump_start_button", "START PUMP", "primaryButton", self._start_pump),
             ("pump_stop_button", "STOP PUMP", "stopButtonSmall", self._stop_pump),
             ("pump_prime_button", "PRIME", "secondaryButton", self._prime_pump),
         ):
-            button = self._button(text, name, 160, 58)
+            width = 210 if attribute != "pump_prime_button" else 160
+            button = self._button(text, name, width, 72)
             button.clicked.connect(handler)
             setattr(self, attribute, button)
-            controls.addWidget(button)
-        controls.addStretch()
-        box.addLayout(controls)
-        body.addWidget(main)
+            actions.addWidget(button)
+        actions.addStretch()
+        box.addLayout(actions)
 
-        info = self._plain_card("card", width=386, height=430)
-        info_box = QVBoxLayout(info)
-        info_box.setContentsMargins(24, 24, 24, 24)
-        info_box.addWidget(self._caption_large("Live pump status"))
         self.pump_info = QLabel()
         self.pump_info.setObjectName("infoText")
         self.pump_info.setWordWrap(True)
-        info_box.addWidget(self.pump_info)
-        info_box.addStretch()
-        body.addWidget(info)
-        body.addStretch()
-        layout.addLayout(body)
+        self.pump_info.setMinimumHeight(70)
+        box.addWidget(self.pump_info)
+
+        layout.addWidget(self.pump_control_card, 0, Qt.AlignHCenter)
         layout.addStretch()
         return root
 
@@ -2610,14 +2616,10 @@ class MainWindow(QMainWindow):
         self.pump_spin.blockSignals(False)
         self.pump_info.setText(
             "Status: {status}\n"
-            "Actual speed: {actual} RPM\n"
-            "Target: {target}\n"
-            "Requested direction: {requested_direction}\n"
-            "Reported direction: {reported_direction}\n"
-            "Full speed: {full_speed}\n"
-            "Readback: {readback}\n"
-            "Tubing: not configured\n"
-            "Flow rate: future calibration".format(
+            "Actual speed: {actual} RPM  |  Target: {target}\n"
+            "Requested direction: {requested_direction}  |  "
+            "Reported direction: {reported_direction}  |  Readback: {readback}\n"
+            "Transition: {transition}  |  Full speed: {full_speed}  |  Error: {error}".format(
                 status=pump_status.lower(),
                 actual=_rpm_value(state.pump.actual_rpm),
                 target=_signed_rpm(state.pump.target_rpm),
@@ -2625,6 +2627,8 @@ class MainWindow(QMainWindow):
                 reported_direction=_reported_pump_direction(state),
                 full_speed="yes" if state.pump.full_speed else "no",
                 readback=_flag(state.pump.readback, "OK", "No response"),
+                transition="reversing" if state.pump.direction_change_pending else "ready",
+                error=_error_text(state.last_error),
             )
         )
 
