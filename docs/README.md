@@ -10,4 +10,7 @@ Current active layout:
 - `../AGENTS.md`: active Codex instructions.
 - `_archive_old/`: retained old documentation and secondary instruction files.
 
-Current priority: autonomous ESP32 heating at 37.50 C, without UART, Raspberry Pi control, or GUI.
+Client operation and delivery guidance:
+
+- [`MICROPLAITE_CLIENT_GUIDE.md`](MICROPLAITE_CLIENT_GUIDE.md): Raspberry Pi
+  startup, controls, storage, safety behavior, and current validation boundary.
