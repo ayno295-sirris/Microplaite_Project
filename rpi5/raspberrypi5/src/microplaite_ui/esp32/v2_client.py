@@ -86,6 +86,8 @@ class V2Status:
     pump_direction: str | None = None
     neopixel_enabled: bool | None = None
     neopixel_brightness: int | None = None
+    neopixel_keep_on: bool | None = None
+    neopixel_auto_off_supported: bool | None = None
 
     @property
     def confirmed_pump_running(self) -> bool | None:
@@ -137,6 +139,11 @@ class V2Status:
                 "neopixel_brightness",
                 minimum=0,
                 maximum=100,
+            ),
+            neopixel_keep_on=_optional_bool(payload, "neopixel_keep_on"),
+            neopixel_auto_off_supported=_optional_bool(
+                payload,
+                "neopixel_auto_off_supported",
             ),
         )
 
@@ -223,12 +230,21 @@ class V2Client:
         V2Status.from_payload(response.payload)
         return response
 
-    def neopixel_set(self, enabled: bool, brightness: int) -> V2Response:
-        return self.send_request(
-            "NEOPIXEL_SET",
-            enabled=bool(enabled),
-            brightness=int(brightness),
-        )
+    def neopixel_set(
+        self,
+        enabled: bool,
+        brightness: int,
+        keep_on: bool | None = None,
+    ) -> V2Response:
+        fields: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "brightness": int(brightness),
+        }
+        if keep_on is not None:
+            if not isinstance(keep_on, bool):
+                _invalid_request("neopixel keep_on must be a boolean")
+            fields["keep_on"] = keep_on
+        return self.send_request("NEOPIXEL_SET", **fields)
 
     def send_request(self, command: str, **fields: Any) -> V2Response:
         return self._exchange(command, fields, expected_type="OK")

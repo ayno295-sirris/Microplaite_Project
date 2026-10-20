@@ -89,8 +89,16 @@ class RecordingV2Client:
             assert self.release_pump_status.wait(1.0)
         return self._record("pump_status", **self.pump_status_payload)
 
-    def neopixel_set(self, enabled: bool, brightness: int) -> V2Response:
-        return self._record("neopixel_set", enabled, brightness)
+    def neopixel_set(
+        self,
+        enabled: bool,
+        brightness: int,
+        keep_on: bool | None = None,
+    ) -> V2Response:
+        args = (enabled, brightness)
+        if keep_on is not None:
+            args += (keep_on,)
+        return self._record("neopixel_set", *args)
 
     def stop(self) -> V2Response:
         return self._record("stop")
@@ -1225,7 +1233,14 @@ def test_shutdown_stops_recipe_worker_before_closing_client_without_stop() -> No
 
 
 def test_v2_status_maps_all_ui_state_fields() -> None:
-    controller, _, session = _ready_controller()
+    client = RecordingV2Client()
+    client.status_value = _status(
+        neopixel_keep_on=True,
+        neopixel_auto_off_supported=True,
+    )
+    session = RecordingSession(client)
+    controller = AppController(V2UiClient(session))
+    controller.open_connection()
 
     state = controller.state
 
@@ -1247,6 +1262,8 @@ def test_v2_status_maps_all_ui_state_fields() -> None:
     assert state.pump_readback_valid is True
     assert state.neopixel_enabled is True
     assert state.neopixel_brightness == 35
+    assert state.neopixel_keep_on is True
+    assert state.neopixel_auto_off_supported is True
     assert state.system_state == "RUNNING"
     assert state.comm_state == "ACTIVE"
     assert state.session_state == "READY"
@@ -1279,6 +1296,151 @@ def test_v2_controller_routes_heating_pump_neopixel_and_global_stop() -> None:
         ("neopixel_set", True, 35),
         ("stop",),
     ]
+
+
+def test_v2_ui_client_forwards_optional_neopixel_keep_on() -> None:
+    client = RecordingV2Client()
+    session = RecordingSession(client)
+    adapter = V2UiClient(session)
+    session.state = SessionState.READY
+
+    adapter.neopixel_set(True, 50, keep_on=True)
+    adapter.neopixel_set(False, 50)
+
+    assert client.calls == [
+        ("neopixel_set", True, 50, True),
+        ("neopixel_set", False, 50),
+    ]
+
+
+def test_neopixel_keep_on_selection_while_off_is_local_only() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.enabled = False
+    controller.state.neopixel.auto_off_supported = True
+    client.calls.clear()
+
+    controller.set_neopixel_keep_on(True)
+
+    assert controller.state.neopixel.keep_on_requested is True
+    assert client.calls == []
+
+
+def test_neopixel_keep_on_change_while_on_is_sent_when_supported() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.enabled = True
+    controller.state.neopixel.auto_off_supported = True
+    client.calls.clear()
+
+    controller.set_neopixel_keep_on(True)
+
+    assert client.calls == [("neopixel_set", True, 35, True)]
+
+
+def test_old_firmware_keeps_historical_neopixel_command_and_rejects_keep_on() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.auto_off_supported = None
+    client.calls.clear()
+
+    controller.set_neopixel_keep_on(True)
+    controller.set_neopixel_enabled(True)
+
+    assert controller.state.neopixel.keep_on_requested is False
+    assert client.calls == [("neopixel_set", True, 35)]
+
+
+def test_timelapse_neopixel_never_inherits_live_keep_on() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.auto_off_supported = True
+    controller.state.neopixel.keep_on_requested = True
+    client.calls.clear()
+
+    controller.timelapse_neopixel_on()
+    controller.timelapse_neopixel_off()
+
+    assert controller.state.neopixel.keep_on_requested is True
+    assert client.calls == [
+        ("neopixel_set", True, 35, False),
+        ("neopixel_set", False, 35, False),
+    ]
+
+
+def test_live_neopixel_starts_once_with_selected_keep_on_policy() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.enabled = False
+    controller.state.neopixel.auto_off_supported = True
+    controller.state.neopixel.keep_on_requested = True
+    client.calls.clear()
+
+    controller.start_live_neopixel(50)
+
+    assert controller.state.neopixel.brightness_percent == 50
+    assert client.calls == [("neopixel_set", True, 50, True)]
+
+
+def test_reported_neopixel_auto_off_does_not_erase_local_keep_on_choice() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.keep_on_requested = True
+    client.status_value = _status(
+        neopixel_enabled=False,
+        neopixel_keep_on=False,
+        neopixel_auto_off_supported=True,
+    )
+
+    controller.refresh_status()
+
+    assert controller.state.neopixel.enabled is False
+    assert controller.state.neopixel.keep_on_reported is False
+    assert controller.state.neopixel.keep_on_requested is True
+
+
+def test_neopixel_keep_on_ui_is_synchronized_and_capability_gated() -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.enabled = False
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(controller)
+    window.timer.stop()
+    window._render()
+
+    assert window.test_keep_neopixel_on_check.isEnabled() is False
+    assert window.camera_keep_neopixel_on_check.isEnabled() is False
+
+    controller.state.neopixel.auto_off_supported = True
+    client.calls.clear()
+    window._render()
+    window.camera_keep_neopixel_on_check.click()
+    app.processEvents()
+
+    assert window.camera_keep_neopixel_on_check.isChecked() is True
+    assert window.test_keep_neopixel_on_check.isChecked() is True
+    assert client.calls == []
+
+
+def test_manual_neopixel_off_during_live_is_not_undone_by_render(monkeypatch) -> None:
+    controller, client, _ = _ready_controller()
+    controller.state.neopixel.auto_off_supported = True
+    controller.state.neopixel.keep_on_requested = True
+    controller.state.neopixel.enabled = False
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(controller)
+    window.timer.stop()
+
+    def fake_start_usb_camera(mode: str, require_qt_recorder: bool = False) -> bool:
+        window._camera_mode = mode
+        return True
+
+    monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
+    client.calls.clear()
+
+    window._start_live_video()
+    window.camera_neopixel_off_button.click()
+    window._render()
+    app.processEvents()
+
+    assert client.calls[-2:] == [
+        ("neopixel_set", True, 80, True),
+        ("neopixel_set", False, 80, False),
+    ]
+    assert controller.state.neopixel.enabled is False
 
 
 def test_ui_stop_uses_hardware_stop_not_session_stop() -> None:

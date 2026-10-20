@@ -153,12 +153,24 @@ class AppController:
         if enabled and not self._activation_allowed():
             self._reject_activation()
             return self.state.last_message
-        self.state.neopixel.enabled = enabled
-        neopixel_set = getattr(self.client, "neopixel_set", None)
-        if callable(neopixel_set):
-            self._call(lambda: neopixel_set(enabled, self.state.neopixel.brightness_percent))
-        else:
-            self._call(self.client.neopixel_on if enabled else self.client.neopixel_off)
+        self._set_neopixel_output(
+            enabled,
+            keep_on=self.state.neopixel.keep_on_requested if enabled else False,
+        )
+        return self.state.last_message
+
+    def set_neopixel_keep_on(self, keep_on: bool) -> str:
+        if not isinstance(keep_on, bool):
+            raise TypeError("keep_on must be a boolean")
+        if self.state.neopixel.auto_off_supported is not True:
+            self.state.last_message = "NeoPixel Keep On is not supported"
+            return self.state.last_message
+        if self.state.neopixel.enabled and not self._activation_allowed():
+            self._reject_activation()
+            return self.state.last_message
+        self.state.neopixel.keep_on_requested = keep_on
+        if self.state.neopixel.enabled:
+            self._set_neopixel_output(True, keep_on=keep_on)
         return self.state.last_message
 
     def set_neopixel_brightness(self, percent: int) -> str:
@@ -168,24 +180,81 @@ class AppController:
             return self.state.last_message
         neopixel_set = getattr(self.client, "neopixel_set", None)
         if callable(neopixel_set):
-            self._call(
-                lambda: neopixel_set(
-                    self.state.neopixel.enabled,
-                    self.state.neopixel.brightness_percent,
-                )
+            keep_on = (
+                self.state.neopixel.keep_on_requested
+                if self.state.neopixel.enabled
+                else False
             )
+            self._set_neopixel_output(self.state.neopixel.enabled, keep_on=keep_on)
         else:
             self._call(lambda: self.client.neopixel_brightness(self.state.neopixel.brightness_percent))
         return self.state.last_message
 
+    def start_live_neopixel(self, brightness_percent: int) -> str:
+        if not self._activation_allowed():
+            self._reject_activation()
+            return self.state.last_message
+        self.state.neopixel.brightness_percent = max(
+            0,
+            min(100, int(brightness_percent)),
+        )
+        if not callable(getattr(self.client, "neopixel_set", None)):
+            self._call(
+                lambda: self.client.neopixel_brightness(
+                    self.state.neopixel.brightness_percent
+                )
+            )
+        self._set_neopixel_output(
+            True,
+            keep_on=self.state.neopixel.keep_on_requested,
+        )
+        return self.state.last_message
+
     def timelapse_neopixel_on(self) -> None:
-        self.set_neopixel_enabled(True)
+        if not self._activation_allowed():
+            self._reject_activation()
+            return
+        self._set_neopixel_output(True, keep_on=False)
 
     def timelapse_neopixel_off(self) -> None:
-        self.set_neopixel_enabled(False)
+        self._set_neopixel_output(False, keep_on=False)
 
     def timelapse_neopixel_brightness(self, percent: int) -> None:
-        self.set_neopixel_brightness(percent)
+        self.state.neopixel.brightness_percent = max(0, min(100, int(percent)))
+        if not self._activation_allowed():
+            self._reject_activation()
+            return
+        neopixel_set = getattr(self.client, "neopixel_set", None)
+        if callable(neopixel_set):
+            self._set_neopixel_output(self.state.neopixel.enabled, keep_on=False)
+        else:
+            self._call(
+                lambda: self.client.neopixel_brightness(
+                    self.state.neopixel.brightness_percent
+                )
+            )
+
+    def _set_neopixel_output(self, enabled: bool, *, keep_on: bool) -> None:
+        self.state.neopixel.enabled = enabled
+        neopixel_set = getattr(self.client, "neopixel_set", None)
+        if callable(neopixel_set):
+            if self.state.neopixel.auto_off_supported is True:
+                self._call(
+                    lambda: neopixel_set(
+                        enabled,
+                        self.state.neopixel.brightness_percent,
+                        keep_on,
+                    )
+                )
+            else:
+                self._call(
+                    lambda: neopixel_set(
+                        enabled,
+                        self.state.neopixel.brightness_percent,
+                    )
+                )
+        else:
+            self._call(self.client.neopixel_on if enabled else self.client.neopixel_off)
 
     def set_pump_target_rpm(self, rpm: float) -> str:
         target = self.prepare_pump_target_rpm(rpm)

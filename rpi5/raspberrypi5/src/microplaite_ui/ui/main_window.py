@@ -1113,6 +1113,9 @@ class MainWindow(QMainWindow):
         neo_buttons.addWidget(self.test_neopixel_on_button)
         neo_buttons.addWidget(self.test_neopixel_off_button)
         controls.addLayout(neo_buttons)
+        self.test_keep_neopixel_on_check = QCheckBox("Keep NeoPixel On")
+        self.test_keep_neopixel_on_check.toggled.connect(self._set_neopixel_keep_on)
+        controls.addWidget(self.test_keep_neopixel_on_check)
 
         self.test_brightness_spin = QSpinBox()
         self.test_brightness_spin.setObjectName("touchSpinBox")
@@ -1211,6 +1214,26 @@ class MainWindow(QMainWindow):
         video_row.addWidget(self.camera_record_video_check)
         video_row.addWidget(self.camera_video_storage_combo)
         video_row.addWidget(self.camera_video_status, 1)
+        self.camera_neopixel_on_button = self._button("LED ON", "okButton", 108, 46)
+        self.camera_neopixel_off_button = self._button(
+            "LED OFF",
+            "secondaryButton",
+            108,
+            46,
+        )
+        self.camera_neopixel_on_button.clicked.connect(
+            lambda: self._set_neopixel_enabled(True)
+        )
+        self.camera_neopixel_off_button.clicked.connect(
+            lambda: self._set_neopixel_enabled(False)
+        )
+        self.camera_keep_neopixel_on_check = QCheckBox("Keep NeoPixel On")
+        self.camera_keep_neopixel_on_check.toggled.connect(
+            self._set_neopixel_keep_on
+        )
+        video_row.addWidget(self.camera_neopixel_on_button)
+        video_row.addWidget(self.camera_neopixel_off_button)
+        video_row.addWidget(self.camera_keep_neopixel_on_check)
         layout.addLayout(video_row)
         self.camera_preview = self._camera_view("USB camera not connected", "cameraFullPreview", zoomable=True)
         self.camera_preview.setFixedSize(*self.CAMERA_FULL_PREVIEW_SIZE)
@@ -2003,12 +2026,15 @@ class MainWindow(QMainWindow):
 
     def _live_neopixel_on(self) -> None:
         brightness_widget = getattr(self, "test_brightness_spin", None)
-        if brightness_widget is not None:
-            self.controller.timelapse_neopixel_brightness(int(brightness_widget.value()))
-        self.controller.timelapse_neopixel_on()
+        brightness = (
+            int(brightness_widget.value())
+            if brightness_widget is not None
+            else self.controller.state.neopixel.brightness_percent
+        )
+        self.controller.start_live_neopixel(brightness)
 
     def _live_neopixel_off(self) -> None:
-        self.controller.timelapse_neopixel_off()
+        self.controller.set_neopixel_enabled(False)
 
     def show_home_page(self) -> None:
         self.pages.setCurrentIndex(self.PAGE_HOME)
@@ -2111,8 +2137,11 @@ class MainWindow(QMainWindow):
             else:
                 self.controller.state.target_c = preferences.target_c
             self.controller.state.pump.target_rpm = preferences.pump_target_rpm
-            self.controller.state.neopixel.enabled = preferences.neopixel_enabled
-            self.controller.state.neopixel.brightness_percent = preferences.neopixel_brightness_percent
+            if not getattr(self.controller.client, "requires_active_session", False):
+                self.controller.state.neopixel.enabled = preferences.neopixel_enabled
+                self.controller.state.neopixel.brightness_percent = (
+                    preferences.neopixel_brightness_percent
+                )
             self._set_combo_data(self.storage_combo, preferences.timelapse_storage_mode)
             self._set_combo_data(self.interval_unit, 60 if preferences.timelapse_interval_unit == "minutes" else 1)
             self._set_widget_value(self.interval_spin, preferences.timelapse_interval_value)
@@ -2213,6 +2242,10 @@ class MainWindow(QMainWindow):
     def _set_neopixel_enabled(self, enabled: bool) -> None:
         self.controller.set_neopixel_enabled(enabled)
         self._save_preferences()
+        self._render()
+
+    def _set_neopixel_keep_on(self, keep_on: bool) -> None:
+        self.controller.set_neopixel_keep_on(bool(keep_on))
         self._render()
 
     def _set_neopixel_brightness(self, percent: int) -> None:
@@ -2519,6 +2552,7 @@ class MainWindow(QMainWindow):
             self.test_brightness_plus_button,
         ):
             widget.setEnabled(manual_activation_allowed)
+        self._render_neopixel_controls(manual_activation_allowed)
         is_v2 = bool(getattr(self.controller.client, "requires_active_session", False))
         reconnect_enabled = status in {"LOST", "DISCONNECTED"}
         for button in self._reconnect_buttons:
@@ -2526,6 +2560,48 @@ class MainWindow(QMainWindow):
             button.setEnabled(is_v2 and reconnect_enabled)
         self.log_view.setPlainText("\n".join(self.controller.logs))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+
+    def _render_neopixel_controls(self, manual_activation_allowed: bool) -> None:
+        state = self.controller.state.neopixel
+        timelapse_running = self.timelapse_service.snapshot().running
+        for button in (
+            self.test_neopixel_on_button,
+            self.camera_neopixel_on_button,
+        ):
+            button.setEnabled(manual_activation_allowed and not timelapse_running)
+        for button in (
+            self.test_neopixel_off_button,
+            self.camera_neopixel_off_button,
+        ):
+            button.setEnabled(not timelapse_running)
+
+        keep_on_available = state.auto_off_supported is True
+        keep_on_enabled = (
+            keep_on_available
+            and not timelapse_running
+            and (not state.enabled or manual_activation_allowed)
+        )
+        tooltip = (
+            "Keep the NeoPixel on beyond the firmware 120-second limit."
+            if keep_on_available
+            else "Requires ESP32 NeoPixel auto-off capability."
+        )
+        for checkbox in (
+            self.test_keep_neopixel_on_check,
+            self.camera_keep_neopixel_on_check,
+        ):
+            blocked = checkbox.blockSignals(True)
+            checkbox.setChecked(state.keep_on_requested)
+            checkbox.blockSignals(blocked)
+            checkbox.setEnabled(keep_on_enabled)
+            checkbox.setToolTip(tooltip)
+
+        status = "NeoPixel ON" if state.enabled else "NeoPixel OFF"
+        if state.enabled and state.brightness_percent == 0:
+            status += " · 0% (no visible light)"
+        elif state.enabled and state.keep_on_reported is True:
+            status += " · Keep On"
+        self.test_neopixel_status.setText(status)
 
     def _render_recipe(self) -> None:
         progress = self.controller.recipe_progress

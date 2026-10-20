@@ -30,6 +30,8 @@ _STATUS_FIELDS = (
     "pump_direction",
     "neopixel_enabled",
     "neopixel_brightness",
+    "neopixel_keep_on",
+    "neopixel_auto_off_supported",
     "system_state",
     "comm_state",
     "session_active",
@@ -120,8 +122,17 @@ class V2UiClient(Esp32Client):
     def pump_status(self) -> ParsedMessage:
         return self._pump_command(self.client.pump_status)
 
-    def neopixel_set(self, enabled: bool, brightness: int) -> ParsedMessage:
-        return self._command(lambda: self.client.neopixel_set(enabled, brightness))
+    def neopixel_set(
+        self,
+        enabled: bool,
+        brightness: int,
+        keep_on: bool | None = None,
+    ) -> ParsedMessage:
+        return self._command(
+            lambda: self.client.neopixel_set(enabled, brightness, keep_on)
+            if keep_on is not None
+            else self.client.neopixel_set(enabled, brightness)
+        )
 
     def read_available(self) -> list[ParsedMessage]:
         if self.session.state is SessionState.LOST:

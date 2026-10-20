@@ -101,6 +101,11 @@ class MemoryTransport:
             lambda client: client.neopixel_set(True, 35),
             b'{"v":2,"id":10,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":35}\n',
         ),
+        (
+            b'{"v":2,"id":10,"type":"OK","cmd":"NEOPIXEL_SET"}\n',
+            lambda client: client.neopixel_set(True, 50, keep_on=True),
+            b'{"v":2,"id":10,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50,"keep_on":true}\n',
+        ),
     ],
 )
 def test_serializes_v2_commands(
@@ -268,6 +273,8 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
         "pump_direction": "CCW",
         "neopixel_enabled": True,
         "neopixel_brightness": 35,
+        "neopixel_keep_on": False,
+        "neopixel_auto_off_supported": True,
         "future_field": "ignored",
     }
     transport = MemoryTransport([(json.dumps(payload, separators=(",", ":")) + "\n").encode()])
@@ -300,7 +307,21 @@ def test_status_parses_known_fields_and_ignores_unknown_fields() -> None:
     assert status.pump_direction == "CCW"
     assert status.neopixel_enabled is True
     assert status.neopixel_brightness == 35
+    assert status.neopixel_keep_on is False
+    assert status.neopixel_auto_off_supported is True
     assert not hasattr(status, "future_field")
+
+
+def test_neopixel_keep_on_requires_strict_boolean() -> None:
+    transport = MemoryTransport()
+    client = V2Client(transport)
+    client.open()
+
+    with pytest.raises(V2ProtocolError) as error:
+        client.neopixel_set(True, 50, keep_on=1)
+
+    assert error.value.kind is ProtocolErrorKind.INVALID_REQUEST
+    assert transport.writes == []
 
 
 def test_unconfirmed_pump_readback_keeps_raw_running_value() -> None:

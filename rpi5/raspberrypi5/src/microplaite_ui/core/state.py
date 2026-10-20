@@ -77,6 +77,9 @@ class NeoPixelState:
     supported: bool = False
     enabled: bool = True
     brightness_percent: int = 80
+    keep_on_requested: bool = False
+    keep_on_reported: bool | None = None
+    auto_off_supported: bool | None = None
 
 
 @dataclass(slots=True)
@@ -418,6 +421,24 @@ class AppState:
     @neopixel_brightness.setter
     def neopixel_brightness(self, value: int | float) -> None:
         self.neopixel_brightness_percent = value
+
+    @property
+    def neopixel_keep_on(self) -> bool | None:
+        return self.neopixel.keep_on_reported
+
+    @neopixel_keep_on.setter
+    def neopixel_keep_on(self, value: bool | None) -> None:
+        self.neopixel.supported = True
+        self.neopixel.keep_on_reported = value
+
+    @property
+    def neopixel_auto_off_supported(self) -> bool | None:
+        return self.neopixel.auto_off_supported
+
+    @neopixel_auto_off_supported.setter
+    def neopixel_auto_off_supported(self, value: bool | None) -> None:
+        self.neopixel.supported = True
+        self.neopixel.auto_off_supported = value
 
 
 def derive_system_status(state: AppState) -> str:
