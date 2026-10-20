@@ -6,6 +6,7 @@
 #include "comm/CommandDispatcher.h"
 #include "comm/SerialCommandService.h"
 #include "services/HeaterService.h"
+#include "services/NeoPixelService.h"
 #include "services/PumpService.h"
 #include "services/SafetyService.h"
 #include "services/SupervisionService.h"
@@ -21,6 +22,7 @@ public:
 private:
     AppState _state;
     Adafruit_NeoPixel _neopixel;
+    NeoPixelService _neopixelService;
     HeaterService _heater;
     PumpService _pump;
     TemperatureService _temperature;
@@ -32,7 +34,6 @@ private:
     uint32_t _lastLoggedTemperatureReadMs = 0;
 
     void updateState();
-    void beginNeoPixel();
     void writeLogIfDue();
     const char* modeText() const;
 };

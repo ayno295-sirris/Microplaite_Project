@@ -37,7 +37,7 @@ const char* parsePumpDirection(const cJSON* request, bool& clockwise)
 }
 }
 
-CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel, SupervisionService& supervision)
+CommandDispatcher::CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, NeoPixelService& neopixel, SupervisionService& supervision)
     : _state(state),
       _heater(heater),
       _temperature(temperature),
@@ -215,17 +215,19 @@ void CommandDispatcher::dispatch(const char* line, Print& out)
 
     if (strcmp(cmd, "NEOPIXEL_SET") == 0) {
         bool enabled = false;
+        bool keepOn = false;
         float brightness = 0;
         error = JsonProtocol::boolean(request.get(), "enabled", enabled);
         if (!error) error = JsonProtocol::number(request.get(), "brightness", 0, 100, brightness);
+        if (!error && cJSON_GetObjectItemCaseSensitive(request.get(), "keep_on")) {
+            error = JsonProtocol::boolean(request.get(), "keep_on", keepOn);
+        }
         if (!error && enabled) error = _supervision.activationError(millis());
         if (error) {
             sendError(id, cmd, error, out);
             return;
         }
-        _state.neopixelEnabled = enabled;
-        _state.neopixelBrightnessPercent = static_cast<uint8_t>(brightness + 0.5f);
-        applyNeoPixel();
+        _neopixel.set(enabled, static_cast<uint8_t>(brightness + 0.5f), keepOn, millis());
         sendOk(id, cmd, out);
         return;
     }
@@ -629,6 +631,9 @@ void CommandDispatcher::sendStatus(long id, Print& out) const
     out.print(_state.neopixelEnabled ? "true" : "false");
     out.print(",\"neopixel_brightness\":");
     out.print(_state.neopixelBrightnessPercent);
+    out.print(",\"neopixel_keep_on\":");
+    out.print(_state.neopixelKeepOn ? "true" : "false");
+    out.print(",\"neopixel_auto_off_supported\":true");
     out.print(",\"safety\":\"");
     out.print(safetyText());
     out.print("\",\"uptime_ms\":");
@@ -1068,8 +1073,8 @@ void CommandDispatcher::printPumpFields(Print& out) const
 
 void CommandDispatcher::sendTextNeoPixelOn(Print& out)
 {
-    _state.neopixelEnabled = true;
-    applyNeoPixel();
+    if (!ensureLegacyNeoPixelAllowed(out)) return;
+    _neopixel.set(true, _state.neopixelBrightnessPercent, false, millis());
     out.print("OK NEOPIXEL_ON");
     printNeoPixelFields(out);
     out.println();
@@ -1077,8 +1082,7 @@ void CommandDispatcher::sendTextNeoPixelOn(Print& out)
 
 void CommandDispatcher::sendTextNeoPixelOff(Print& out)
 {
-    _state.neopixelEnabled = false;
-    applyNeoPixel();
+    _neopixel.stop();
     out.print("OK NEOPIXEL_OFF");
     printNeoPixelFields(out);
     out.println();
@@ -1092,8 +1096,8 @@ void CommandDispatcher::sendTextNeoPixelBrightness(const char* args, Print& out)
         return;
     }
 
-    _state.neopixelBrightnessPercent = static_cast<uint8_t>(percent + 0.5f);
-    applyNeoPixel();
+    if (_state.neopixelEnabled && percent > 0 && !ensureLegacyNeoPixelAllowed(out)) return;
+    _neopixel.set(_state.neopixelEnabled, static_cast<uint8_t>(percent + 0.5f), _state.neopixelKeepOn, millis());
     out.print("OK NEOPIXEL_BRIGHTNESS");
     printNeoPixelFields(out);
     out.println();
@@ -1106,16 +1110,16 @@ void CommandDispatcher::sendTextNeoPixelStatus(Print& out) const
     out.println();
 }
 
-void CommandDispatcher::applyNeoPixel()
+bool CommandDispatcher::ensureLegacyNeoPixelAllowed(Print& out)
 {
-    const uint8_t brightness = static_cast<uint8_t>((static_cast<uint16_t>(_state.neopixelBrightnessPercent) * 255U) / 100U);
-    _neopixel.setBrightness(brightness);
-    if (_state.neopixelEnabled && _state.neopixelBrightnessPercent > 0) {
-        _neopixel.fill(_neopixel.Color(255, 255, 255, 255));
-    } else {
-        _neopixel.clear();
+    if (_state.commState == CommState::NO_SESSION) return true;
+    const char* error = _supervision.activationError(millis());
+    if (error) {
+        out.print("ERR ");
+        out.println(error);
+        return false;
     }
-    _neopixel.show();
+    return true;
 }
 
 void CommandDispatcher::printNeoPixelFields(Print& out) const

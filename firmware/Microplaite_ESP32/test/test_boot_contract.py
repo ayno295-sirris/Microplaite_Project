@@ -51,11 +51,19 @@ class BootContract(unittest.TestCase):
 
     def test_neopixel_boot_clears_pixels_and_brightness(self):
         self.assertIn("bool neopixelEnabled = false;", self.state)
+        self.assertIn("bool neopixelKeepOn = false;", self.state)
         self.assertIn("uint8_t neopixelBrightnessPercent = 0;", self.state)
-        pixels = body(self.app, "void App::beginNeoPixel()")
-        self.assertIn("_neopixel.setBrightness(0);", pixels)
-        self.assertLess(pixels.index("_neopixel.clear();"), pixels.index("_neopixel.show();"))
-        self.assertNotIn(".fill(", pixels)
+        self.assertIn("_neopixelService.begin();", self.boot)
+        pixels = source("src/services/NeoPixelService.cpp")
+        begin = body(pixels, "void NeoPixelService::begin()")
+        self.assertIn("_state.neopixelBrightnessPercent = 0;", begin)
+        self.assertIn("stop();", begin)
+        stop = body(pixels, "void NeoPixelService::stop()")
+        self.assertIn("_state.neopixelEnabled = false;", stop)
+        self.assertIn("_state.neopixelKeepOn = false;", stop)
+        self.assertIn("apply();", stop)
+        apply = body(pixels, "void NeoPixelService::apply()")
+        self.assertLess(apply.index("_pixels.clear();"), apply.index("_pixels.show();"))
 
     def test_no_session_or_auto_activation_at_boot(self):
         begin = body(self.supervision, "void SupervisionService::begin(")
@@ -71,7 +79,22 @@ class BootContract(unittest.TestCase):
         command = body(source("src/comm/CommandDispatcher.cpp"), 'if (strcmp(cmd, "NEOPIXEL_SET") == 0)')
         self.assertIn("if (!error && enabled) error = _supervision.activationError(millis());", command)
         self.assertLess(command.index("activationError("), command.index("if (error)"))
-        self.assertLess(command.index("if (error)"), command.index("_state.neopixelEnabled = enabled;"))
+        self.assertIn("_neopixel.set(", command)
+        self.assertLess(command.index("if (error)"), command.index("_neopixel.set("))
+
+    def test_neopixel_timer_is_polled_before_commands(self):
+        update = body(self.app, "void App::update()")
+        self.assertIn("_neopixelService.update(millis());", update)
+        self.assertLess(update.index("_neopixelService.update("), update.index("_serialCommands.update();"))
+        self.assertNotIn("delay(", update)
+
+    def test_neopixel_safety_stop_runs_before_pump_wait(self):
+        stop = body(self.supervision, "bool SupervisionService::stop()")
+        self.assertIn("_neopixel.stop();", stop)
+        self.assertLess(stop.index("_heater.stop();"), stop.index("_neopixel.stop();"))
+        self.assertLess(stop.index("_neopixel.stop();"), stop.index("_pump.stop(_state);"))
+        update = body(self.supervision, "void SupervisionService::update(")
+        self.assertIn("else _neopixel.stop();", update)
 
     def test_existing_heartbeat_timeout_and_heater_first_stop_wiring(self):
         header = source("src/services/SupervisionService.h")

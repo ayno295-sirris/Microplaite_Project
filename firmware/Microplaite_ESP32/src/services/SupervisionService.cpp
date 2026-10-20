@@ -1,10 +1,11 @@
 #include "services/SupervisionService.h"
 
 #include "services/HeaterService.h"
+#include "services/NeoPixelService.h"
 #include "services/PumpService.h"
 
-SupervisionService::SupervisionService(AppState& state, HeaterService& heater, PumpService& pump)
-    : _state(state), _heater(heater), _pump(pump)
+SupervisionService::SupervisionService(AppState& state, HeaterService& heater, PumpService& pump, NeoPixelService& neopixel)
+    : _state(state), _heater(heater), _pump(pump), _neopixel(neopixel)
 {
 }
 
@@ -40,6 +41,7 @@ void SupervisionService::update(uint32_t now)
     if (sessionActive() && heartbeatAgeMs(now) > HEARTBEAT_TIMEOUT_MS) {
         _state.commState = CommState::LOST; // Revoke before any blocking pump transaction.
         if (actuatorsActive()) stop();
+        else _neopixel.stop();
     }
     refreshState();
 }
@@ -74,6 +76,7 @@ const char* SupervisionService::activationError(uint32_t now)
 bool SupervisionService::stop()
 {
     _heater.stop();
+    _neopixel.stop();
     const bool written = _pump.stop(_state);
     _state.heaterEnabled = false;
     _state.heaterOutputPercent = _heater.outputPercent();

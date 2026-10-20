@@ -27,7 +27,7 @@ Chaque exemple est une ligne à terminer par LF, sans envoyer le bloc entier.
 | STATUS | `{"v":2,"id":2,"cmd":"STATUS"}` | État mémorisé ; aucune transaction RJ. |
 | SYNC | `{"v":2,"id":17,"cmd":"SYNC"}` | Ouvre/renouvelle la session, sans activation ni effacement d'erreur. Refusé en FAULT. |
 | HEARTBEAT | `{"v":2,"id":18,"cmd":"HEARTBEAT"}` | Rafraîchit une session encore ACTIVE ; ne réactive jamais une session perdue. |
-| STOP | `{"v":2,"id":3,"cmd":"STOP"}` | Chauffage coupé et timer manuel annulé avant STOP pompe. |
+| STOP | `{"v":2,"id":3,"cmd":"STOP"}` | Chauffage coupé, timer manuel annulé et NeoPixel éteint avant STOP pompe. |
 | CLEAR_ERROR | `{"v":2,"id":4,"cmd":"CLEAR_ERROR"}` | Lecture thermique et conditions de réarmement existantes ; ne démarre aucun équipement. |
 | HEATER_SET_TARGET | `{"v":2,"id":5,"cmd":"HEATER_SET_TARGET","target_c":37.5}` | 20 à 60 °C inclus. |
 | HEATER_SET_PID | `{"v":2,"id":6,"cmd":"HEATER_SET_PID","kp":8,"ki":0.03,"kd":20}` | Trois nombres >= 0, représentables en float (`FLT_MAX` maximum) ; réinitialisation PID existante. |
@@ -40,7 +40,7 @@ Chaque exemple est une ligne à terminer par LF, sans envoyer le bloc entier.
 | PUMP_SET_RPM | `{"v":2,"id":13,"cmd":"PUMP_SET_RPM","rpm":5}` | Session ACTIVE sans FAULT requise. 0 à 100 inclus ; conserve les indicateurs de marche/full-speed mémorisés. |
 | PUMP_PRIME | `{"v":2,"id":14,"cmd":"PUMP_PRIME"}` | Session ACTIVE sans FAULT requise. Prime existant, sans temporisation propre ajoutée. |
 | PUMP_STATUS | `{"v":2,"id":15,"cmd":"PUMP_STATUS"}` | Déclenche un RJ. |
-| NEOPIXEL_SET | `{"v":2,"id":16,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50}` | Deux champs obligatoires ; booléen strict et nombre 0 à 100, arrondi à l'entier comme en legacy. `enabled=true` exige une session ACTIVE sans FAULT ; `false` reste autorisé hors session. |
+| NEOPIXEL_SET | `{"v":2,"id":16,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50,"keep_on":false}` | `enabled` et `brightness` obligatoires : booléen strict et nombre 0 à 100, arrondi à l'entier comme en legacy. `keep_on` est un booléen optionnel, défaut false. `enabled=true` exige une session ACTIVE sans FAULT ; `false` reste autorisé hors session. |
 
 V2 ne permet pas d'activer MANUAL. Un test MANUAL lancé en texte reste visible dans STATUS.
 Les commandes de réglage n'activent pas le chauffage.
@@ -82,7 +82,7 @@ thermal_test_mode, max_target_c, warning_temp_c, emergency_cutoff_c
 power_limit_percent, pid_kp, pid_ki, pid_kd, pid_output_limit_percent, pid_integral
 safety, last_error, error_latched
 pump_running, pump_rpm, pump_full_speed, pump_readback_valid
-neopixel_enabled, neopixel_brightness
+neopixel_enabled, neopixel_brightness, neopixel_keep_on, neopixel_auto_off_supported=true
 system_state, comm_state, session_active, heartbeat_age_ms
 ```
 
@@ -90,6 +90,99 @@ system_state, comm_state, session_active, heartbeat_age_ms
 `heater_mode` décrit le mode réel du service : IDLE, ONOFF, PID ou MANUAL ; `safety` est séparé (OK/WARNING/ERROR).
 `heater_gpio_on` est l'état de sortie commandé, sans retour de mesure électrique.
 Température et safety sont mémorisés par la boucle existante ; STATUS ne déclenche aucune lecture capteur/pompe.
+
+## NeoPixel : contrat commun RPi / ESP32
+
+La commande reste `NEOPIXEL_SET`. Aucun champ `neopixel_on` n'est ajouté.
+Les deux champs historiques de STATUS sont conservés. `neopixel_enabled` est
+l'autorisation logique ; l'éclairage effectif exige aussi `neopixel_brightness > 0`.
+`neopixel_keep_on` indique la dérogation courante, jamais conservée après OFF,
+STOP, LOST ou reboot. `neopixel_auto_off_supported` vaut toujours true.
+
+Requêtes complètes, une ligne à la fois après SYNC, avec les heartbeats habituels :
+
+```json
+{"v":2,"id":20,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50}
+{"v":2,"id":21,"cmd":"NEOPIXEL_SET","enabled":false,"brightness":50}
+{"v":2,"id":22,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50,"keep_on":true}
+{"v":2,"id":23,"cmd":"NEOPIXEL_SET","enabled":true,"brightness":50,"keep_on":false}
+```
+
+Ces lignes correspondent à ON normal (ancien client), OFF, Keep On et retour au
+timer. Chaque requête réussie reçoit uniquement l'ACK existant avec son propre ID :
+
+```json
+{"v":2,"id":20,"type":"OK","cmd":"NEOPIXEL_SET"}
+```
+
+`keep_on` absent signifie false, y compris après une dérogation précédente.
+Si présent, un autre type que booléen, même null, retourne BAD_ARGUMENT_TYPE
+sans appliquer la demande. Les erreurs existantes de champs obligatoires,
+bornes et session restent identiques. Exemple :
+
+```json
+{"v":2,"id":22,"type":"ERR","cmd":"NEOPIXEL_SET","error":"NO_SESSION"}
+```
+
+- Transition effective OFF vers ON : départ d'une période de 120000 ms.
+- ON répété ou changement entre luminosités non nulles : pas de prolongation.
+- Luminosité nulle : aucun éclairage ; le retour à une luminosité non nulle
+  constitue une nouvelle transition OFF vers ON.
+- Keep On true : pas de coupure par le timer. Son passage à false pendant ON
+  démarre une nouvelle période de 120000 ms ; répéter false ne la prolonge pas.
+- OFF explicite : extinction et annulation du timer et de Keep On, même si la
+  requête contient `keep_on=true`. La luminosité demandée reste mémorisée.
+- Expiration : `neopixel_enabled=false`, `neopixel_keep_on=false`, luminosité
+  conservée. Pas de réponse spontanée ; consulter STATUS.
+- STOP global : chauffage d'abord, puis LED OFF, puis transaction pompe. Une
+  erreur d'écriture ou de readback pompe n'empêche pas l'extinction des LED.
+- LOST : LED OFF même si seuls les NeoPixel étaient actifs, sans transaction
+  pompe supplémentaire dans ce cas. Keep On n'autorise aucune reprise après SYNC.
+- Boot : OFF, luminosité 0 et Keep On false.
+
+Le pilotage est centralisé dans `NeoPixelService`, avec le même objet Adafruit,
+les mêmes couleurs, GPIO et conversion de luminosité qu'auparavant. Un seul
+horodatage et une soustraction non signée couvrent le débordement de millis().
+La boucle existante vérifie le timer avant les commandes : extinction au premier
+passage à ou après 120000 ms. Les attentes capteur/pompe déjà présentes peuvent
+retarder ce passage ; aucune nouvelle attente ni tâche n'est ajoutée. Cette
+protection suppose l'ESP32 alimenté et sa boucle en fonctionnement.
+
+Legacy : NEOPIXEL_ON utilise le timer normal et annule une dérogation précédente ;
+NEOPIXEL_BRIGHTNESS conserve la dérogation courante sans réarmer un éclairage
+continu. NEOPIXEL_OFF annule tout. Avant toute session, le mode texte bench reste
+disponible. Après LOST, un ON texte est refusé (ERR NO_SESSION), jusqu'à SYNC ;
+un changement de luminosité ne peut pas réactiver un éclairage après cet arrêt.
+
+Time-lapse : conserver ON normal sans Keep On avant le cliché, puis OFF après
+capture. Aucune modification caméra/RPi ni seconde séquence d'acquisition.
+
+Requête STATUS complète :
+
+```json
+{"v":2,"id":24,"cmd":"STATUS"}
+```
+
+Exemple complet conforme aux champs réellement sérialisés, avec valeurs
+illustratives pour une session READY, chauffage et pompe arrêtés, LED ON normale.
+Ce n'est pas un log matériel ni une confirmation de la version en flash :
+
+```json
+{
+  "v":2,"id":24,"type":"STATUS","cmd":"STATUS",
+  "temp_c":25.00,"temperature_available":true,"temperature_valid":true,"temperature_fault":0,
+  "heater_mode":"IDLE","heater_gpio_on":false,"heater_target_c":37.50,
+  "thermal_test_mode":true,"max_target_c":60.00,"warning_temp_c":60.00,"emergency_cutoff_c":62.00,
+  "heater_output_percent":0.0,"power_limit_percent":30.0,
+  "pid_kp":8.00,"pid_ki":0.030,"pid_kd":20.00,"pid_output_limit_percent":15.0,"pid_integral":0.000,
+  "last_error":"NONE","error_latched":false,
+  "pump_running":false,"pump_rpm":0.1,"pump_full_speed":false,"pump_readback_valid":true,
+  "pump_direction":"CW","pump_bidirectional_supported":true,
+  "neopixel_enabled":true,"neopixel_brightness":50,"neopixel_keep_on":false,"neopixel_auto_off_supported":true,
+  "safety":"OK","uptime_ms":5000,"system_state":"READY","comm_state":"ACTIVE",
+  "session_active":true,"heartbeat_age_ms":215
+}
+```
 
 ## Session et états système
 
@@ -104,13 +197,13 @@ Température et safety sont mémorisés par la boucle existante ; STATUS ne déc
 - HEARTBEAT n'est accepté qu'en session ACTIVE. Il maintient la communication même en FAULT, sans effacer ni masquer cette faute.
 - RPi nominal : heartbeat toutes les 500 ms. À plus de 1000 ms, l'âge est informatif seulement : aucune transition ni coupure. Le client peut afficher le retard depuis `heartbeat_age_ms`.
 - Timeout strict : soustraction non signée `now - lastHeartbeatMs > 3000`. Exactement 3000 ms n'expire pas la session. Le calcul couvre le débordement de millis().
-- À expiration : LOST avant toute attente pompe. Si un actionneur est actif, appel au STOP global existant, chauffage d'abord puis pompe. Sans actionneur actif, aucune transaction pompe supplémentaire.
+- À expiration : LOST avant toute attente pompe. Si un actionneur est actif, appel au STOP global existant, chauffage d'abord, NeoPixel OFF puis pompe. Sans actionneur actif, NeoPixel OFF sans transaction pompe supplémentaire.
 - Après arrêt : IDLE, sauf FAULT prioritaire ou pompe toujours indiquée RUNNING. Un STOP non confirmé ne doit pas masquer une indication de marche conservée après échec d'écriture ou RJ RUNNING.
 - L'arrêt sur timeout est tenté une seule fois. Aucun redémarrage ni nouvelle tentative automatique. STOP explicite reste disponible.
 - Un heartbeat tardif retourne NO_SESSION. Un nouveau SYNC est nécessaire, puis une commande explicite pour redémarrer. Les lectures/configurations/arrêts restent disponibles hors session ; HEATER_ENABLE, PUMP_START, PUMP_PRIME, PUMP_SET_RPM et NEOPIXEL_SET avec enabled=true sont verrouillés.
 - `heartbeat_age_ms` est un entier en session ACTIVE, sinon null, y compris en LOST.
 - STOP texte ou JSON reste accessible en FAULT et sans session ; il ne clear aucune erreur et ne renouvelle pas le heartbeat. Après arrêt, READY si ACTIVE, IDLE sans session, avec FAULT toujours prioritaire.
-- Les commandes texte bench restent utilisables sans SYNC. Si une session a été ouverte, son timeout surveille aussi les actionneurs activés en texte ; après perte de session, une nouvelle activation texte reste un geste bench explicite.
+- Les commandes texte bench restent utilisables sans SYNC. Si une session a été ouverte, son timeout surveille aussi les actionneurs activés en texte. Après LOST, les activations texte NeoPixel nécessitent SYNC ; les règles legacy chauffage/pompe ne changent pas.
 
 Extrait de STATUS :
 
@@ -123,7 +216,7 @@ La boucle traite la sécurité locale avant la supervision puis les commandes. L
 ## Boot failsafe
 
 - Première opération de `App::begin()` : `HeaterService::begin()` place le GPIO chauffage OFF, le mode IDLE, réinitialise le PID et annule le timer MANUAL. Aucun mode ni état antérieur n'est restauré.
-- Ensuite, NeoPixel est initialisé OFF : état false, luminosité 0, buffer effacé puis transmis. En texte bench, un ON seul conserve cette luminosité nulle ; régler explicitement la luminosité pour éclairer.
+- Ensuite, NeoPixel est initialisé OFF : état false, Keep On false, luminosité 0, buffer effacé puis transmis. En texte bench, un ON seul conserve cette luminosité nulle ; régler explicitement la luminosité pour éclairer.
 - Après `PumpService::begin()`, un unique `PumpService::stop(_state)` est exécuté avant l'initialisation du service de commandes et de la session. Aucun START, PRIME ou rappel de vitesse.
 - La séquence validée reste WJ STOP, attente de réponse WJ valide, puis RJ. Le budget d'attente existant partagé WJ/RJ est de 200 ms ; les écritures/flush UART et autres initialisations s'y ajoutent. Aucun retry ni délai supplémentaire n'est ajouté.
 - Pompe absente : aucune réponse WJ, donc aucun RJ envoyé ; le budget expire et le boot continue, avec `pump_readback_valid=false`. Un échec d'écriture ou un RJ invalide/absent laisse également ce drapeau false. Aucun acquittement applicatif STOP réussi n'est émis au boot.
@@ -163,7 +256,9 @@ Ils restent à compiler/exécuter par Noam ; aucun build ni upload n'a été lan
 
 Les tests Unity `test/test_supervision/test_main.cpp` exercent le vrai service avec une horloge passée explicitement et des doublures chauffage/pompe sans accès GPIO/RS485 : BOOT/IDLE, SYNC/READY, chaque source RUNNING, STOP/READY ou IDLE, heartbeat, seuils 1000/3000/3001, perte de session, ordre de coupure, absence de reprise, priorité FAULT, panne d'initialisation, STOP pompe échoué et débordement millis(). Ils ne sont pas exécutés pendant cette tâche. Garder `test_build_src=false` (configuration existante) : ce test inclut le service sous test et remplace uniquement ses dépendances matérielles à l'édition des liens.
 
-Les six tests statiques `python -B test/test_boot_contract.py` vérifient le câblage des appels dans les sources : chauffage OFF en premier, STOP pompe avant les commandes, NeoPixel OFF, NO_SESSION/sans reprise, verrou V2 NeoPixel et séquence heartbeat conservée. Ils s'exécutent sans compilation ni accès matériel ; ils ne remplacent ni les tests C++ ni la validation au banc.
+Les huit tests statiques `python -B test/test_boot_contract.py` vérifient le câblage des appels dans les sources : chauffage OFF en premier, STOP pompe avant les commandes, NeoPixel OFF/Keep On false, NO_SESSION/sans reprise, verrou V2 NeoPixel, timer avant les commandes, extinction LED avant l'attente pompe et séquence heartbeat conservée. Ils s'exécutent sans compilation ni accès matériel ; ils ne remplacent ni les tests C++ ni la validation au banc.
+
+Douze cas NeoPixel sont ajoutés à la suite Unity existante `test/test_pump_bidirectional/test_main.cpp` : limite exacte 120 s, ON/luminosité répétés, OFF à 30 s et nouvel ON, Keep On et retour au timer, luminosité nulle et débordement, STOP malgré écriture pompe échouée, LOST avec LED seules sans nouvelle transaction pompe, reboot, ancien client et contrat STATUS, OFF prioritaire, types keep_on invalides, legacy et cycles courts time-lapse. Les 18 cas pompe/chauffage/supervision préexistants sont conservés. Les tests C++ sont ajoutés mais ni compilés ni exécutés pendant cette tâche.
 
 Revue bench à effectuer par Noam après compilation :
 

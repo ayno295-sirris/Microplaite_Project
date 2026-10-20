@@ -63,6 +63,7 @@ void testDigitalWrite(uint8_t, uint8_t value) { heaterGpioOn = value != LOW; }
 #include "../../src/services/PumpService.cpp"
 #include "../../src/services/HeaterService.cpp"
 #include "../../src/services/TemperatureService.cpp"
+#include "../../src/services/NeoPixelService.cpp"
 #include "../../src/services/SupervisionService.cpp"
 #include "../../src/comm/CommandDispatcher.cpp"
 #undef Serial1
@@ -83,12 +84,14 @@ struct Bench {
     TemperatureService temperature;
     PumpService pump;
     Adafruit_NeoPixel pixel;
-    SupervisionService supervision{state, heater, pump};
-    CommandDispatcher dispatcher{state, heater, temperature, pump, pixel, supervision};
+    NeoPixelService neopixel{state, pixel};
+    SupervisionService supervision{state, heater, pump, neopixel};
+    CommandDispatcher dispatcher{state, heater, temperature, pump, neopixel, supervision};
 
     void boot()
     {
         heater.begin();
+        neopixel.begin();
         pump.begin();
         TEST_ASSERT_TRUE(pump.stop(state));
         supervision.begin(true);
@@ -454,6 +457,201 @@ void test_reboot_stops_without_restoring_direction_or_session()
     TEST_ASSERT_EQUAL(SystemState::IDLE, rebooted.state.systemState);
 }
 
+void test_neopixel_timeout_boundary_and_repeated_on()
+{
+    Bench b;
+    b.neopixel.set(true, 50, false, 0);
+    b.neopixel.set(true, 80, false, 30000);
+    b.neopixel.set(true, 10, false, 90000);
+    b.neopixel.update(119999);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    b.neopixel.update(120000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelEnabled);
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+}
+
+void test_neopixel_explicit_off_and_new_on_restart_timer()
+{
+    Bench b;
+    b.neopixel.set(true, 50, false, 0);
+    b.neopixel.set(false, 50, true, 30000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    b.neopixel.update(50000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    b.neopixel.set(true, 50, false, 60000);
+    b.neopixel.update(179999);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    b.neopixel.update(180000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_keep_on_then_disable_starts_one_new_period()
+{
+    Bench b;
+    b.neopixel.set(true, 50, true, 0);
+    b.neopixel.update(500000);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    b.neopixel.set(true, 50, false, 500000);
+    b.neopixel.set(true, 50, false, 530000);
+    b.neopixel.update(619999);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    b.neopixel.update(620000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_zero_brightness_and_wraparound()
+{
+    Bench b;
+    b.neopixel.set(true, 0, false, 0);
+    TEST_ASSERT_TRUE(b.state.neopixelEnabled);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    const uint32_t start = UINT32_MAX - 60000;
+    b.neopixel.set(true, 50, false, start);
+    b.neopixel.update(start + 119999U);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    b.neopixel.update(start + 120000U);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_stop_overrides_keep_on_even_if_pump_write_fails()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    b.neopixel.set(true, 50, true, nowMs);
+    testSerial.writeFails = true;
+    auto response = b.request("{\"v\":2,\"id\":21,\"cmd\":\"STOP\"}");
+    assertString(response.get(), "error", "PUMP_WRITE_FAILED");
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    b.neopixel.update(500000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_only_lost_stops_without_pump_transaction_or_auto_resume()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    b.neopixel.set(true, 50, true, nowMs);
+    nowMs = 3001;
+    b.supervision.update(nowMs);
+    TEST_ASSERT_EQUAL(CommState::LOST, b.state.commState);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    TEST_ASSERT_EQUAL_UINT(2, testSerial.writes.size());
+    auto response = b.request("{\"v\":2,\"id\":22,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50,\"keep_on\":true}");
+    assertString(response.get(), "error", "NO_SESSION");
+    Output legacy;
+    b.dispatcher.dispatch("NEOPIXEL_ON", legacy);
+    TEST_ASSERT_EQUAL_STRING("ERR NO_SESSION\r\n", legacy.text.c_str());
+    TEST_ASSERT_EQUAL_STRING("NO_SESSION", b.supervision.heartbeat(nowMs));
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    b.request("{\"v\":2,\"id\":23,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50}");
+    TEST_ASSERT_TRUE(b.neopixel.on());
+}
+
+void test_neopixel_boot_clears_keep_on_and_brightness()
+{
+    Bench b;
+    b.neopixel.set(true, 50, true, 0);
+    b.boot();
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    TEST_ASSERT_EQUAL_UINT8(0, b.state.neopixelBrightnessPercent);
+    TEST_ASSERT_EQUAL(CommState::NO_SESSION, b.state.commState);
+    TEST_ASSERT_EQUAL(SystemState::IDLE, b.state.systemState);
+}
+
+void test_neopixel_old_json_client_and_status_contract()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    auto response = b.request("{\"v\":2,\"id\":21,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50}");
+    assertString(response.get(), "type", "OK");
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    response = b.request("{\"v\":2,\"id\":22,\"cmd\":\"STATUS\"}");
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_on"));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_auto_off_supported")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_keep_on")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_enabled")));
+    b.neopixel.set(true, 0, false, nowMs);
+    response = b.request("{\"v\":2,\"id\":23,\"cmd\":\"STATUS\"}");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_enabled")));
+    TEST_ASSERT_EQUAL_INT(0, cJSON_GetObjectItemCaseSensitive(response.get(), "neopixel_brightness")->valueint);
+}
+
+void test_neopixel_json_keep_on_and_off_cancel_override()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    auto response = b.request("{\"v\":2,\"id\":21,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50,\"keep_on\":true}");
+    assertString(response.get(), "type", "OK");
+    TEST_ASSERT_TRUE(b.state.neopixelKeepOn);
+    response = b.request("{\"v\":2,\"id\":22,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":false,\"brightness\":50,\"keep_on\":true}");
+    assertString(response.get(), "type", "OK");
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_json_bad_keep_on_has_no_effect()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    for (const char* value : {"null", "1", "\"true\"", "[]", "{}"}) {
+        const std::string request = std::string("{\"v\":2,\"id\":21,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50,\"keep_on\":") + value + "}";
+        auto response = b.request(request.c_str());
+        assertString(response.get(), "error", "BAD_ARGUMENT_TYPE");
+        TEST_ASSERT_FALSE(b.neopixel.on());
+        TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    }
+}
+
+void test_neopixel_legacy_bench_timer_and_expired_session_guard()
+{
+    Bench b;
+    b.boot();
+    Output out;
+    b.dispatcher.dispatch("NEOPIXEL_BRIGHTNESS 50", out);
+    b.dispatcher.dispatch("NEOPIXEL_ON", out);
+    TEST_ASSERT_TRUE(b.neopixel.on());
+    TEST_ASSERT_FALSE(b.state.neopixelKeepOn);
+    nowMs = 30000;
+    b.dispatcher.dispatch("NEOPIXEL_ON", out);
+    nowMs = 60000;
+    b.dispatcher.dispatch("NEOPIXEL_BRIGHTNESS 80", out);
+    b.neopixel.update(120000);
+    TEST_ASSERT_FALSE(b.neopixel.on());
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    nowMs += 3001;
+    out.text.clear();
+    b.dispatcher.dispatch("NEOPIXEL_ON", out);
+    TEST_ASSERT_EQUAL_STRING("ERR NO_SESSION\r\n", out.text.c_str());
+    TEST_ASSERT_FALSE(b.neopixel.on());
+}
+
+void test_neopixel_timelapse_short_on_off_cycles()
+{
+    Bench b;
+    b.boot();
+    TEST_ASSERT_NULL(b.supervision.sync(nowMs));
+    for (int shot = 0; shot < 3; ++shot) {
+        auto response = b.request("{\"v\":2,\"id\":21,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":true,\"brightness\":50}");
+        assertString(response.get(), "type", "OK");
+        b.neopixel.update(nowMs + 50);
+        TEST_ASSERT_TRUE(b.neopixel.on());
+        response = b.request("{\"v\":2,\"id\":22,\"cmd\":\"NEOPIXEL_SET\",\"enabled\":false,\"brightness\":50}");
+        TEST_ASSERT_FALSE(b.neopixel.on());
+    }
+    TEST_ASSERT_EQUAL_UINT(2, testSerial.writes.size());
+}
+
 void setup()
 {
     UNITY_BEGIN();
@@ -475,6 +673,18 @@ void setup()
     RUN_TEST(test_global_stop_keeps_direction_and_no_resume);
     RUN_TEST(test_heartbeat_loss_keeps_stop_and_requires_new_sync);
     RUN_TEST(test_reboot_stops_without_restoring_direction_or_session);
+    RUN_TEST(test_neopixel_timeout_boundary_and_repeated_on);
+    RUN_TEST(test_neopixel_explicit_off_and_new_on_restart_timer);
+    RUN_TEST(test_neopixel_keep_on_then_disable_starts_one_new_period);
+    RUN_TEST(test_neopixel_zero_brightness_and_wraparound);
+    RUN_TEST(test_neopixel_stop_overrides_keep_on_even_if_pump_write_fails);
+    RUN_TEST(test_neopixel_only_lost_stops_without_pump_transaction_or_auto_resume);
+    RUN_TEST(test_neopixel_boot_clears_keep_on_and_brightness);
+    RUN_TEST(test_neopixel_old_json_client_and_status_contract);
+    RUN_TEST(test_neopixel_json_keep_on_and_off_cancel_override);
+    RUN_TEST(test_neopixel_json_bad_keep_on_has_no_effect);
+    RUN_TEST(test_neopixel_legacy_bench_timer_and_expired_session_guard);
+    RUN_TEST(test_neopixel_timelapse_short_on_off_cycles);
     UNITY_END();
 }
 void loop() {}

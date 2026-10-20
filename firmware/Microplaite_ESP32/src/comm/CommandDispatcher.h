@@ -1,17 +1,17 @@
 #pragma once
 
-#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 
 #include "app/AppState.h"
 #include "services/HeaterService.h"
+#include "services/NeoPixelService.h"
 #include "services/PumpService.h"
 #include "services/SupervisionService.h"
 #include "services/TemperatureService.h"
 
 class CommandDispatcher {
 public:
-    CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, Adafruit_NeoPixel& neopixel, SupervisionService& supervision);
+    CommandDispatcher(AppState& state, HeaterService& heater, TemperatureService& temperature, PumpService& pump, NeoPixelService& neopixel, SupervisionService& supervision);
 
     void dispatch(const char* line, Print& out);
     void sendLineTooLong(Print& out);
@@ -22,7 +22,7 @@ private:
     HeaterService& _heater;
     TemperatureService& _temperature;
     PumpService& _pump;
-    Adafruit_NeoPixel& _neopixel;
+    NeoPixelService& _neopixel;
     SupervisionService& _supervision;
 
     bool dispatchTextCommand(const char* line, Print& out);
@@ -69,7 +69,7 @@ private:
     void sendTextNeoPixelOff(Print& out);
     void sendTextNeoPixelBrightness(const char* args, Print& out);
     void sendTextNeoPixelStatus(Print& out) const;
-    void applyNeoPixel();
+    bool ensureLegacyNeoPixelAllowed(Print& out);
     void printNeoPixelFields(Print& out) const;
     void sendStop(long id, Print& out);
     void printJsonPumpFields(Print& out) const;

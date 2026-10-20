@@ -4,6 +4,7 @@
 #include "../../src/services/SupervisionService.h"
 #include "../../src/services/HeaterService.h"
 #include "../../src/services/PumpService.h"
+#include "../../src/services/NeoPixelService.h"
 
 // Link-time hardware doubles: these tests never access GPIO or RS485.
 namespace {
@@ -34,6 +35,7 @@ bool PumpService::stop(AppState& state)
 }
 
 // PlatformIO's existing test configuration excludes application sources.
+#include "../../src/services/NeoPixelService.cpp"
 #include "../../src/services/SupervisionService.cpp"
 
 void setUp()
@@ -48,7 +50,9 @@ struct Bench {
     AppState state;
     HeaterService heater{14};
     PumpService pump;
-    SupervisionService supervision{state, heater, pump};
+    Adafruit_NeoPixel pixel;
+    NeoPixelService neopixel{state, pixel};
+    SupervisionService supervision{state, heater, pump, neopixel};
 };
 
 void test_boot_idle_and_sync_without_actuation()

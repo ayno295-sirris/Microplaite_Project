@@ -31,6 +31,7 @@ struct AppState {
     bool pumpClockwise = true; // Controller-reported direction, qualified by pumpReadbackValid.
 
     bool neopixelEnabled = false;
+    bool neopixelKeepOn = false;
     uint8_t neopixelBrightnessPercent = 0;
 
     SafetyLevel safetyLevel = SafetyLevel::OK;

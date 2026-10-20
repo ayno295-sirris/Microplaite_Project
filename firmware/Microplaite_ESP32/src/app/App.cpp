@@ -8,9 +8,10 @@
 
 App::App()
     : _neopixel(NEOPIXEL_COUNT, PIN_NEOPIXEL_DATA, NEO_GRBW + NEO_KHZ800),
+      _neopixelService(_state, _neopixel),
       _heater(PIN_HEATER_PWM),
-      _supervision(_state, _heater, _pump),
-      _dispatcher(_state, _heater, _temperature, _pump, _neopixel, _supervision),
+      _supervision(_state, _heater, _pump, _neopixelService),
+      _dispatcher(_state, _heater, _temperature, _pump, _neopixelService, _supervision),
       _serialCommands(_dispatcher)
 {
 }
@@ -18,7 +19,7 @@ App::App()
 void App::begin()
 {
     _heater.begin(); // GPIO OFF, all heating modes and manual timer reset first.
-    beginNeoPixel();
+    _neopixelService.begin();
     _pump.begin();
     _pump.stop(_state); // Bounded existing WJ/RJ sequence; readback qualifies STOP.
     Serial.begin(SERIAL_BAUD);
@@ -46,6 +47,7 @@ void App::update()
     _heater.update(_state.temperatureC, _state.temperatureValid, _state.safetyLevel);
     updateState();
     _supervision.update(millis());
+    _neopixelService.update(millis());
     _serialCommands.update();
     updateState();
     _supervision.update(millis());
@@ -62,14 +64,6 @@ void App::updateState()
     _state.heaterTargetC = _heater.targetC();
     _state.heaterOutputPercent = _heater.outputPercent();
     _state.uptimeMs = millis();
-}
-
-void App::beginNeoPixel()
-{
-    _neopixel.begin();
-    _neopixel.setBrightness(0);
-    _neopixel.clear();
-    _neopixel.show();
 }
 
 void App::writeLogIfDue()

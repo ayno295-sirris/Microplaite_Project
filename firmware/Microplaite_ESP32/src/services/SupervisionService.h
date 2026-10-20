@@ -4,6 +4,7 @@
 
 class HeaterService;
 class PumpService;
+class NeoPixelService;
 
 class SupervisionService {
 public:
@@ -11,7 +12,7 @@ public:
     static constexpr uint32_t HEARTBEAT_WARNING_MS = 1000; // Informative only; no stop here.
     static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 3000;
 
-    SupervisionService(AppState& state, HeaterService& heater, PumpService& pump);
+    SupervisionService(AppState& state, HeaterService& heater, PumpService& pump, NeoPixelService& neopixel);
     void begin(bool hardwareReady);
     void update(uint32_t now);
     void refreshState();
@@ -29,6 +30,7 @@ private:
     AppState& _state;
     HeaterService& _heater;
     PumpService& _pump;
+    NeoPixelService& _neopixel;
     bool _initialized = false;
     bool _hardwareReady = false;
     uint32_t _lastHeartbeatMs = 0;
