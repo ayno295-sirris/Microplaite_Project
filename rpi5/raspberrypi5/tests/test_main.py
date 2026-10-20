@@ -1853,6 +1853,29 @@ def test_pump_page_large_step_buttons_use_fine_steps_below_10_rpm() -> None:
     assert window.controller.state.pump.target_rpm == 9.9
 
 
+def test_pump_slider_gesture_preserves_fractional_target_with_relative_steps() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    controller = AppController(FakeEsp32Client())
+    window = MainWindow(controller)
+    window.timer.stop()
+    controller.state.pump.target_rpm = 3.5
+    controller.state.pump.running = False
+    window._render()
+
+    window._begin_pump_slider_gesture()
+    initial_position = window.pump_slider.value()
+    window.pump_slider.setValue(initial_position + 1)
+    assert controller.state.pump.target_rpm == 4.5
+    window.pump_slider.setValue(initial_position + 2)
+    assert controller.state.pump.target_rpm == 5.5
+    window.pump_slider.setValue(initial_position + 7)
+    assert controller.state.pump.target_rpm == 10.5
+    window._end_pump_slider_gesture()
+
+    assert controller.wait_for_pump_updates(1.0)
+    assert controller.state.pump.running is False
+
+
 def test_pump_page_accepts_full_signed_range() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow(AppController(FakeEsp32Client()))

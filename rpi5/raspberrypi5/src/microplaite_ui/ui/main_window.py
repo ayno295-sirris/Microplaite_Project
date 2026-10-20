@@ -261,6 +261,11 @@ class MainWindow(QMainWindow):
         self._timelapse_notice = ""
         self._maintenance_dialog: QDialog | None = None
         self._close_cleanup_done = False
+        self._pump_slider_active = False
+        self._pump_slider_base_position = 0
+        self._pump_slider_base_target = 0.0
+        self._pump_slider_started_running = False
+        self._pump_slider_generation = 0
         self.timelapse_service = TimelapseService(
             capture_image=self._save_camera_image,
             neopixel_on=self.controller.timelapse_neopixel_on,
@@ -803,7 +808,9 @@ class MainWindow(QMainWindow):
         self.pump_slider.setObjectName("rpmSlider")
         self.pump_slider.setRange(-100, 100)
         self.pump_slider.setValue(50)
-        self.pump_slider.valueChanged.connect(self._set_pump_target_rpm)
+        self.pump_slider.sliderPressed.connect(self._begin_pump_slider_gesture)
+        self.pump_slider.valueChanged.connect(self._pump_slider_value_changed)
+        self.pump_slider.sliderReleased.connect(self._end_pump_slider_gesture)
         box.addWidget(self.pump_slider)
 
         rpm_control = QHBoxLayout()
@@ -818,7 +825,7 @@ class MainWindow(QMainWindow):
         self.pump_spin.setSuffix(" RPM")
         self.pump_spin.setValue(50.0)
         self.pump_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.pump_spin.valueChanged.connect(self._set_pump_target_rpm)
+        self.pump_spin.editingFinished.connect(self._commit_pump_spin)
         self.pump_minus_button.clicked.connect(lambda: self._nudge_pump_target(-1))
         self.pump_plus_button.clicked.connect(lambda: self._nudge_pump_target(1))
         rpm_control.addWidget(self.pump_minus_button)
@@ -2336,19 +2343,82 @@ class MainWindow(QMainWindow):
         self._save_preferences()
         self._render()
 
+    def _queue_pump_target_rpm(
+        self,
+        rpm: float,
+        *,
+        allow_restart: bool,
+        activation_generation: int | None = None,
+    ) -> None:
+        try:
+            self.controller.request_pump_target_rpm(
+                rpm,
+                allow_restart=allow_restart,
+                activation_generation=activation_generation,
+            )
+        except ValueError as exc:
+            message = f"Pump target rejected: {exc}"
+            self.controller.state.last_message = message
+            self.controller.logs.append(message)
+        self._save_preferences()
+        self._render()
+
+    def _begin_pump_slider_gesture(self) -> None:
+        self._pump_slider_active = True
+        self._pump_slider_base_position = self.pump_slider.value()
+        self._pump_slider_base_target = float(self.controller.state.pump.target_rpm)
+        self._pump_slider_started_running = bool(self.controller.state.pump.running)
+        self._pump_slider_generation = self.controller.pump_activation_generation
+
+    def _pump_slider_value_changed(self, position: int) -> None:
+        if self._pump_slider_active:
+            rpm = self._pump_slider_base_target + (
+                position - self._pump_slider_base_position
+            )
+            generation = self._pump_slider_generation
+            allow_restart = self._pump_slider_started_running
+        else:
+            rpm = float(position)
+            generation = self.controller.pump_activation_generation
+            allow_restart = bool(self.controller.state.pump.running)
+        rpm = max(-100.0, min(100.0, rpm))
+        self._queue_pump_target_rpm(
+            rpm,
+            allow_restart=allow_restart,
+            activation_generation=generation,
+        )
+
+    def _end_pump_slider_gesture(self) -> None:
+        if not self._pump_slider_active:
+            return
+        self._pump_slider_value_changed(self.pump_slider.value())
+        self._pump_slider_active = False
+
+    def _commit_pump_spin(self) -> None:
+        self._queue_pump_target_rpm(
+            float(self.pump_spin.value()),
+            allow_restart=bool(self.controller.state.pump.running),
+            activation_generation=self.controller.pump_activation_generation,
+        )
+
     def _nudge_pump_target(self, direction: int) -> None:
         current = float(self.controller.state.pump.target_rpm)
         fine_step = abs(current) < 10.0 or (
             abs(current) <= 10.0 and current * direction < 0.0
         )
         step = 0.1 if fine_step else 1.0
-        self._set_pump_target_rpm(current + (step * direction))
+        self._queue_pump_target_rpm(
+            current + (step * direction),
+            allow_restart=bool(self.controller.state.pump.running),
+            activation_generation=self.controller.pump_activation_generation,
+        )
 
     def _start_pump(self) -> None:
         self.controller.start_pump()
         self._render()
 
     def _stop_pump(self) -> None:
+        self._pump_slider_started_running = False
         self.controller.stop_pump()
         self._render()
 
@@ -2533,7 +2603,8 @@ class MainWindow(QMainWindow):
         self.pump_target_rpm.setText(_signed_rpm(state.pump.target_rpm))
         self.pump_slider.blockSignals(True)
         self.pump_spin.blockSignals(True)
-        self.pump_slider.setValue(round(state.pump.target_rpm))
+        if not self._pump_slider_active:
+            self.pump_slider.setValue(round(state.pump.target_rpm))
         self.pump_spin.setValue(state.pump.target_rpm)
         self.pump_slider.blockSignals(False)
         self.pump_spin.blockSignals(False)
