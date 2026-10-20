@@ -757,6 +757,8 @@ def test_layout_constants_fit_1280x720(tmp_path: Path) -> None:
     assert timelapse_cards[0].y() > pump_cards[0].geometry().bottom()
     assert window.home_camera_preview.size().width() == 464
     assert window.home_camera_preview.size().height() == 348
+    window._camera_mode = "live"
+    window.timelapse_service._set_snapshot(live_running=True)
     window._camera_image = QImage(320, 240, QImage.Format.Format_RGB32)
     window._camera_image.fill(0x216EE5)
     window._paint_camera_image()
@@ -1639,7 +1641,8 @@ def test_live_video_recording_uses_selected_internal_storage(tmp_path, monkeypat
     assert destinations[0].name.startswith("video_")
     assert destinations[0].suffix == ".mp4"
     assert window._video_recorder is recorder
-    assert window.home_camera_badge.text() == "Recording"
+    assert window.home_camera_badge.text() == "Live"
+    assert window.camera_preview_badge.text() == "Recording"
     assert "video recording started" in "\n".join(window.controller.logs)
 
     window._stop_live_video()
@@ -1734,10 +1737,14 @@ def test_test_capture_runs_without_live_and_toggles_neopixel(tmp_path, monkeypat
     assert len(saved) == 1
     assert window.timelapse_service.snapshot().last_file == str(saved[0])
     assert window._camera_mode == "idle"
-    assert window.home_camera_badge.text() == "Last picture"
+    assert window.home_camera_badge.text() == "No active preview"
     assert window.timelapse_camera_badge.text() == "Last picture"
     assert window.camera_preview_badge.text() == "Last picture"
-    assert window.home_camera_preview.pixmap() is not None
+    assert window.home_camera_preview.pixmap().isNull()
+    assert window.home_camera_preview.text() == (
+        "No active preview\n"
+        "Start Live Preview or a Time-lapse to view images."
+    )
     assert window.timelapse_live_preview.pixmap() is not None
     assert window.camera_preview.pixmap() is not None
     assert client.commands == [
@@ -1770,6 +1777,85 @@ def test_timelapse_camera_preview_uses_only_saved_images(tmp_path) -> None:
     assert window._last_picture_path == str(saved)
     assert window._preview_badge_text() == "Last picture"
     assert window._preview_image().pixelColor(0, 0).name() == "#0022cc"
+
+
+def test_dashboard_camera_idle_clears_stale_capture_and_explains_how_to_start() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    stale = QImage(32, 24, QImage.Format.Format_RGB32)
+    stale.fill(0xAA0000)
+    with window._camera_image_lock:
+        window._last_picture_image = stale
+        window._last_picture_path = "/tmp/old-session.jpg"
+    window._camera_mode = "idle"
+
+    window._render()
+
+    assert window.home_camera_badge.text() == "No active preview"
+    assert window.home_camera_preview.pixmap().isNull()
+    assert window.home_camera_preview.text() == (
+        "No active preview\n"
+        "Start Live Preview or a Time-lapse to view images."
+    )
+
+
+def test_dashboard_camera_waits_for_first_current_timelapse_image() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    stale = QImage(32, 24, QImage.Format.Format_RGB32)
+    stale.fill(0xAA0000)
+    with window._camera_image_lock:
+        window._last_picture_image = stale
+        window._last_picture_path = "/tmp/old-session.jpg"
+    window._camera_mode = "timelapse"
+    window.timelapse_service._set_snapshot(running=True, last_file="")
+
+    window._render()
+
+    assert window.home_camera_badge.text() == "Time-lapse"
+    assert window.home_camera_preview.pixmap().isNull()
+    assert window.home_camera_preview.text() == "Waiting for first time-lapse image..."
+
+
+def test_dashboard_camera_uses_latest_image_from_current_timelapse_session(
+    tmp_path,
+) -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    current_path = tmp_path / "current.jpg"
+    current = QImage(40, 30, QImage.Format.Format_RGB32)
+    current.fill(0x0022CC)
+    assert current.save(str(current_path), "JPG")
+    window._camera_mode = "timelapse"
+    window.timelapse_service._set_snapshot(
+        running=True,
+        last_file=str(current_path),
+    )
+
+    window._render()
+
+    assert window.home_camera_badge.text() == "Time-lapse"
+    assert window.home_camera_preview.pixmap() is not None
+
+
+def test_dashboard_camera_live_frame_has_priority() -> None:
+    QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(AppController(FakeEsp32Client()))
+    window.timer.stop()
+    live = QImage(32, 24, QImage.Format.Format_RGB32)
+    live.fill(0x149653)
+    with window._camera_image_lock:
+        window._camera_image = live
+    window._camera_mode = "live"
+    window.timelapse_service._set_snapshot(live_running=True, running=True)
+
+    window._render()
+
+    assert window.home_camera_badge.text() == "Live"
+    assert window.home_camera_preview.pixmap() is not None
 
 
 def test_timelapse_stop_button_stays_visible_on_both_tabs() -> None:

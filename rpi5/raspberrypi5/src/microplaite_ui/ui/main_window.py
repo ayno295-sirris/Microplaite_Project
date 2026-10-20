@@ -1721,11 +1721,11 @@ class MainWindow(QMainWindow):
             pass
 
     def _paint_camera_image(self) -> None:
+        self._render_dashboard_camera_preview()
         image = self._preview_image()
         if image.isNull():
             return
         previews = (
-            self.home_camera_preview,
             self.camera_preview,
             getattr(self, "timelapse_live_preview", None),
         )
@@ -1737,6 +1737,51 @@ class MainWindow(QMainWindow):
             scaled = self._camera_preview_pixmap(image, preview)
             preview.setText("")
             preview.setPixmap(scaled)
+
+    def _render_dashboard_camera_preview(self) -> None:
+        badge, message, image, tooltip = self._dashboard_camera_content()
+        self.home_camera_badge.setText(badge)
+        self.home_camera_badge.setToolTip(tooltip)
+        self.home_camera_preview.clear()
+        if image.isNull():
+            self.home_camera_preview.setText(message)
+            return
+        self.home_camera_preview.setPixmap(
+            self._camera_preview_pixmap(image, self.home_camera_preview)
+        )
+
+    def _dashboard_camera_content(self) -> tuple[str, str, QImage, str]:
+        snap = self.timelapse_service.snapshot()
+        with self._camera_image_lock:
+            if (
+                self._camera_mode == "live"
+                and snap.live_running
+                and not self._camera_image.isNull()
+            ):
+                return "Live", "", self._camera_image.copy(), ""
+            if self._camera_mode == "timelapse" and snap.running:
+                if not snap.last_file:
+                    return (
+                        "Time-lapse",
+                        "Waiting for first time-lapse image...",
+                        QImage(),
+                        "",
+                    )
+                if (
+                    self._last_picture_path == snap.last_file
+                    and not self._last_picture_image.isNull()
+                ):
+                    image = self._last_picture_image.copy()
+                else:
+                    image = QImage(snap.last_file)
+                if not image.isNull():
+                    return "Time-lapse", "", image, snap.last_file
+        return (
+            "No active preview",
+            "No active preview\nStart Live Preview or a Time-lapse to view images.",
+            QImage(),
+            "",
+        )
 
     def _camera_preview_pixmap(self, image: QImage, preview: QLabel) -> QPixmap:
         if preview is self.camera_preview and self._camera_zoom > self.CAMERA_ZOOM_MIN:
@@ -2747,13 +2792,10 @@ class MainWindow(QMainWindow):
         with self._camera_image_lock:
             path = self._last_picture_path
         tooltip = path if text == "Last picture" and path else ""
-        for label in (
-            self.home_camera_badge,
-            self.timelapse_camera_badge,
-            self.camera_preview_badge,
-        ):
+        for label in (self.timelapse_camera_badge, self.camera_preview_badge):
             label.setText(text)
             label.setToolTip(tooltip)
+        self._render_dashboard_camera_preview()
 
     def _preview_badge_text(self) -> str:
         if self._video_recorder is not None:
