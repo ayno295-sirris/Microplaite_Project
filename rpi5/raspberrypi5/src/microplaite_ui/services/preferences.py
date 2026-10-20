@@ -29,7 +29,7 @@ class UserPreferences:
     timelapse_interval_value: int = 10
     timelapse_interval_unit: str = "seconds"
     timelapse_brightness_percent: int = 80
-    timelapse_light_duration_s: float = 1.0
+    timelapse_led_stabilization_ms: int = 2500
     timelapse_total_duration_min: int = 60
     timelapse_infinite: bool = False
     live_record_video: bool = False
@@ -89,7 +89,12 @@ def _validated(raw: dict[str, Any]) -> UserPreferences:
     prefs.timelapse_interval_value = _clamp_int(prefs.timelapse_interval_value, 1, 86400, 10)
     prefs.timelapse_interval_unit = prefs.timelapse_interval_unit if prefs.timelapse_interval_unit in {"seconds", "minutes"} else "seconds"
     prefs.timelapse_brightness_percent = _clamp_int(prefs.timelapse_brightness_percent, 0, 100, 80)
-    prefs.timelapse_light_duration_s = _clamp_float(prefs.timelapse_light_duration_s, 0.0, 60.0, 1.0, 1)
+    prefs.timelapse_led_stabilization_ms = _clamp_int(
+        prefs.timelapse_led_stabilization_ms,
+        0,
+        60000,
+        2500,
+    )
     prefs.timelapse_total_duration_min = _clamp_int(prefs.timelapse_total_duration_min, 1, 10080, 60)
     prefs.timelapse_infinite = bool(prefs.timelapse_infinite)
     prefs.live_record_video = bool(prefs.live_record_video)

@@ -17,7 +17,7 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
             timelapse_interval_value=3,
             timelapse_interval_unit="minutes",
             timelapse_brightness_percent=44,
-            timelapse_light_duration_s=2.5,
+            timelapse_led_stabilization_ms=3200,
             timelapse_total_duration_min=90,
             timelapse_infinite=True,
             live_record_video=True,
@@ -34,6 +34,7 @@ def test_preferences_store_saves_and_loads_json(tmp_path) -> None:
     assert loaded.neopixel_enabled is False
     assert loaded.timelapse_storage_mode == "external"
     assert loaded.timelapse_interval_unit == "minutes"
+    assert loaded.timelapse_led_stabilization_ms == 3200
     assert loaded.timelapse_infinite is True
     assert loaded.live_record_video is True
     assert loaded.video_storage_mode == "external"
@@ -50,7 +51,7 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
                 "timelapse_storage_mode": "bad",
                 "timelapse_interval_value": 0,
                 "timelapse_interval_unit": "hours",
-                "timelapse_light_duration_s": 99,
+                "timelapse_led_stabilization_ms": 999999,
                 "timelapse_total_duration_min": -1,
                 "live_record_video": 1,
                 "video_storage_mode": "bad",
@@ -67,7 +68,7 @@ def test_preferences_store_validates_bad_values(tmp_path) -> None:
     assert prefs.timelapse_storage_mode == "internal"
     assert prefs.timelapse_interval_value == 1
     assert prefs.timelapse_interval_unit == "seconds"
-    assert prefs.timelapse_light_duration_s == 60.0
+    assert prefs.timelapse_led_stabilization_ms == 60000
     assert prefs.timelapse_total_duration_min == 1
     assert prefs.live_record_video is True
     assert prefs.video_storage_mode == "internal"
@@ -108,3 +109,14 @@ def test_preferences_save_normalizes_invalid_pump_target_to_safe_zero(tmp_path) 
 
     assert json.loads(path.read_text(encoding="utf-8"))["pump_target_rpm"] == 0.0
     assert store.load().pump_target_rpm == 0.0
+
+
+def test_timelapse_stabilization_uses_new_2500_ms_default_for_legacy_preferences(
+    tmp_path,
+) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"timelapse_light_duration_s": 1.0}', encoding="utf-8")
+
+    prefs = PreferencesStore(path).load()
+
+    assert prefs.timelapse_led_stabilization_ms == 2500

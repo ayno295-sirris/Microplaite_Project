@@ -1355,7 +1355,7 @@ def test_main_window_restores_user_preferences_between_sessions() -> None:
     first.interval_spin.setValue(7)
     first.interval_unit.setCurrentIndex(1)
     first._set_timelapse_brightness_value(42, send_to_esp32=False)
-    first.light_duration_spin.setValue(2.3)
+    first.light_stabilization_spin.setValue(2300)
     first.total_duration_spin.setValue(90)
     first.infinite_check.setChecked(True)
     first.test_record_video_check.setChecked(True)
@@ -1374,7 +1374,7 @@ def test_main_window_restores_user_preferences_between_sessions() -> None:
     assert second.interval_unit.currentData() == 60
     assert second.timelapse_brightness_spin.value() == 42
     assert second.test_brightness_spin.value() == 42
-    assert second.light_duration_spin.value() == 2.3
+    assert second.light_stabilization_spin.value() == 2300
     assert second.total_duration_spin.value() == 90
     assert second.infinite_check.isChecked() is True
     assert second.test_record_video_check.isChecked() is True
@@ -1445,7 +1445,10 @@ def test_timelapse_page_replaces_neopixel_card_and_shows_controls() -> None:
     assert window.pages.currentIndex() == MainWindow.PAGE_TIMELAPSE
     assert window.storage_combo.currentData() == "internal"
     assert window.timelapse_brightness_spin.value() == 80
-    assert window.light_duration_spin.value() == 1.0
+    assert window.light_stabilization_spin.value() == 2500
+    assert window._timelapse_settings().light_duration_s == 2.5
+    labels = {label.text() for label in window.timelapse_page.findChildren(QLabel)}
+    assert "LED stabilization before capture (ms)" in labels
     assert window.home_timelapse_status.text() == "Stopped"
     assert "Path:" in window.timelapse_path.text()
     assert window.timelapse_stack.currentIndex() == 0
@@ -1481,8 +1484,8 @@ def test_timelapse_fields_use_large_step_buttons() -> None:
         window.interval_plus_button,
         window.timelapse_brightness_minus_button,
         window.timelapse_brightness_plus_button,
-        window.light_duration_minus_button,
-        window.light_duration_plus_button,
+        window.light_stabilization_minus_button,
+        window.light_stabilization_plus_button,
         window.total_duration_minus_button,
         window.total_duration_plus_button,
         window.test_brightness_minus_button,
@@ -1506,10 +1509,10 @@ def test_timelapse_step_buttons_update_numeric_fields() -> None:
     assert window.timelapse_brightness_spin.value() == 81
     assert window.test_brightness_spin.value() == 81
 
-    window.light_duration_minus_button.click()
-    assert window.light_duration_spin.value() == 0.9
-    window.light_duration_plus_button.click()
-    assert window.light_duration_spin.value() == 1.0
+    window.light_stabilization_minus_button.click()
+    assert window.light_stabilization_spin.value() == 2400
+    window.light_stabilization_plus_button.click()
+    assert window.light_stabilization_spin.value() == 2500
 
     window.total_duration_minus_button.click()
     assert window.total_duration_spin.value() == 59
@@ -1723,7 +1726,7 @@ def test_test_capture_runs_without_live_and_toggles_neopixel(tmp_path, monkeypat
         return True
 
     monkeypatch.setattr(window, "_start_usb_camera", fake_start_usb_camera)
-    window.light_duration_spin.setValue(0.0)
+    window.light_stabilization_spin.setValue(0)
 
     window._test_capture()
 

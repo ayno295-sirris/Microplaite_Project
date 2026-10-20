@@ -26,7 +26,7 @@ class TimelapseSettings:
     storage_mode: str = "internal"
     interval_s: float = 10.0
     brightness_percent: int = 80
-    light_duration_s: float = 1.0
+    light_duration_s: float = 2.5
     total_duration_s: float = 60.0
     infinite: bool = False
 
@@ -71,12 +71,14 @@ class TimelapseService:
         neopixel_off: Callable[[], None],
         set_neopixel_brightness: Callable[[int], None],
         log: Callable[[str], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._capture_image = capture_image
         self._neopixel_on = neopixel_on
         self._neopixel_off = neopixel_off
         self._set_neopixel_brightness = set_neopixel_brightness
         self._log = log or (lambda message: None)
+        self._clock = clock
         self._lock = threading.Lock()
         self._capture_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -117,6 +119,11 @@ class TimelapseService:
 
     def start(self, settings: TimelapseSettings) -> bool:
         settings = self._validated(settings)
+        if settings.light_duration_s >= settings.interval_s:
+            self._set_error(
+                "LED stabilization must be shorter than the capture interval"
+            )
+            return False
         with self._lock:
             already_running = self._snapshot.running
             live_running = self._snapshot.live_running
@@ -177,6 +184,7 @@ class TimelapseService:
         path = self.resolve_storage_path(settings.storage_mode)
         try:
             self._ensure_writable(path)
+            self._stop_event.clear()
             filename = f"test_capture_{_stamp()}.jpg"
             self._capture_once(settings, path / filename, for_test=True)
             return True
@@ -205,27 +213,37 @@ class TimelapseService:
         return free_bytes(path)
 
     def _run_timelapse(self, settings: TimelapseSettings, session_dir: Path) -> None:
-        started = time.monotonic()
-        next_start = started + settings.interval_s
+        started = self._clock()
+        next_capture = started + settings.interval_s
         image_index = 1
         try:
             while not self._stop_event.is_set():
-                if not settings.infinite and time.monotonic() - started >= settings.total_duration_s:
+                if (
+                    not settings.infinite
+                    and next_capture - started > settings.total_duration_s
+                ):
                     break
-                wait_s = max(0.0, next_start - time.monotonic())
-                if self._stop_event.wait(wait_s):
+                prelight_start = next_capture - settings.light_duration_s
+                if not self._wait_until(prelight_start):
                     break
                 if self.free_bytes(session_dir) < MIN_FREE_BYTES:
                     raise RuntimeError("disk space too low, timelapse stopped")
                 filename = f"img_{image_index:06d}_{_stamp()}.jpg"
-                capture_started = time.monotonic()
-                self._capture_once(settings, session_dir / filename, for_test=False)
+                saved = self._capture_once(
+                    settings,
+                    session_dir / filename,
+                    for_test=False,
+                    capture_deadline=next_capture,
+                )
+                if saved is None:
+                    break
                 image_index += 1
-                elapsed = time.monotonic() - capture_started
-                if elapsed > settings.interval_s:
-                    self._append_log("capture skipped because previous capture is still running")
-                while next_start <= time.monotonic():
-                    next_start += settings.interval_s
+                next_capture += settings.interval_s
+                while next_capture - settings.light_duration_s <= self._clock():
+                    self._append_log(
+                        "capture skipped because previous capture is still running"
+                    )
+                    next_capture += settings.interval_s
         except Exception as exc:
             self._set_error(str(exc))
             self._record_error(str(exc))
@@ -235,7 +253,13 @@ class TimelapseService:
             status = "error" if self.snapshot().error else "stopped"
             self._set_snapshot(running=False, capture_in_progress=False, status=status)
 
-    def _capture_once(self, settings: TimelapseSettings, destination: Path, for_test: bool) -> Path:
+    def _capture_once(
+        self,
+        settings: TimelapseSettings,
+        destination: Path,
+        for_test: bool,
+        capture_deadline: float | None = None,
+    ) -> Path | None:
         if not self._capture_lock.acquire(blocking=False):
             self._append_log("capture skipped because previous capture is still running")
             return destination
@@ -243,7 +267,10 @@ class TimelapseService:
         try:
             self._set_neopixel_brightness(settings.brightness_percent)
             self._neopixel_on()
-            self._sleep_light(settings.light_duration_s)
+            if capture_deadline is None:
+                capture_deadline = self._clock() + settings.light_duration_s
+            if not self._wait_until(capture_deadline):
+                return None
             saved = self._capture_image(destination)
             frames = self._snapshot.frames_captured + (0 if for_test else 1)
             self._set_snapshot(
@@ -261,10 +288,14 @@ class TimelapseService:
             self._capture_lock.release()
 
     def _sleep_light(self, seconds: float) -> None:
-        end = time.monotonic() + max(0.0, seconds)
-        while time.monotonic() < end:
-            if self._stop_event.wait(min(0.05, end - time.monotonic())):
-                break
+        self._wait_until(self._clock() + max(0.0, seconds))
+
+    def _wait_until(self, deadline: float) -> bool:
+        while self._clock() < deadline:
+            remaining = deadline - self._clock()
+            if self._stop_event.wait(min(0.05, remaining)):
+                return False
+        return not self._stop_event.is_set()
 
     def _create_session(self, settings: TimelapseSettings) -> Path:
         base = self.resolve_storage_path(settings.storage_mode)

@@ -957,30 +957,29 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._small_text("NeoPixel power"), 2, 0)
         grid.addLayout(brightness_control, 2, 1, 1, 2)
 
-        self.light_duration_spin = QDoubleSpinBox()
-        self.light_duration_spin.setObjectName("touchSpinBox")
-        self.light_duration_spin.setRange(0.0, 60.0)
-        self.light_duration_spin.setSingleStep(0.1)
-        self.light_duration_spin.setDecimals(1)
-        self.light_duration_spin.setSuffix(" s")
-        self.light_duration_spin.setValue(1.0)
-        self.light_duration_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.light_duration_spin.valueChanged.connect(self._timelapse_form_changed)
-        light_duration_control = QHBoxLayout()
-        light_duration_control.setSpacing(8)
-        self.light_duration_minus_button = self._button("-", "fieldStepButton", 56, 44)
-        self.light_duration_plus_button = self._button("+", "fieldStepButton", 56, 44)
-        self.light_duration_minus_button.clicked.connect(
-            lambda: self._nudge_numeric_field(self.light_duration_spin, -0.1)
+        self.light_stabilization_spin = QSpinBox()
+        self.light_stabilization_spin.setObjectName("touchSpinBox")
+        self.light_stabilization_spin.setRange(0, 60000)
+        self.light_stabilization_spin.setSingleStep(100)
+        self.light_stabilization_spin.setSuffix(" ms")
+        self.light_stabilization_spin.setValue(2500)
+        self.light_stabilization_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.light_stabilization_spin.valueChanged.connect(self._timelapse_form_changed)
+        light_stabilization_control = QHBoxLayout()
+        light_stabilization_control.setSpacing(8)
+        self.light_stabilization_minus_button = self._button("-", "fieldStepButton", 56, 44)
+        self.light_stabilization_plus_button = self._button("+", "fieldStepButton", 56, 44)
+        self.light_stabilization_minus_button.clicked.connect(
+            lambda: self._nudge_numeric_field(self.light_stabilization_spin, -100)
         )
-        self.light_duration_plus_button.clicked.connect(
-            lambda: self._nudge_numeric_field(self.light_duration_spin, 0.1)
+        self.light_stabilization_plus_button.clicked.connect(
+            lambda: self._nudge_numeric_field(self.light_stabilization_spin, 100)
         )
-        light_duration_control.addWidget(self.light_duration_minus_button)
-        light_duration_control.addWidget(self.light_duration_spin)
-        light_duration_control.addWidget(self.light_duration_plus_button)
-        grid.addWidget(self._small_text("Light duration"), 3, 0)
-        grid.addLayout(light_duration_control, 3, 1, 1, 2)
+        light_stabilization_control.addWidget(self.light_stabilization_minus_button)
+        light_stabilization_control.addWidget(self.light_stabilization_spin)
+        light_stabilization_control.addWidget(self.light_stabilization_plus_button)
+        grid.addWidget(self._small_text("LED stabilization before capture (ms)"), 3, 0)
+        grid.addLayout(light_stabilization_control, 3, 1, 1, 2)
 
         self.total_duration_spin = QSpinBox()
         self.total_duration_spin.setObjectName("touchSpinBox")
@@ -2061,7 +2060,10 @@ class MainWindow(QMainWindow):
             self._set_widget_value(self.interval_spin, preferences.timelapse_interval_value)
             self._set_widget_value(self.timelapse_brightness_spin, preferences.timelapse_brightness_percent)
             self._set_widget_value(self.test_brightness_spin, preferences.timelapse_brightness_percent)
-            self._set_widget_value(self.light_duration_spin, preferences.timelapse_light_duration_s)
+            self._set_widget_value(
+                self.light_stabilization_spin,
+                preferences.timelapse_led_stabilization_ms,
+            )
             self._set_widget_value(self.total_duration_spin, preferences.timelapse_total_duration_min)
             blocked = self.infinite_check.blockSignals(True)
             self.infinite_check.setChecked(preferences.timelapse_infinite)
@@ -2083,7 +2085,7 @@ class MainWindow(QMainWindow):
             timelapse_interval_value=int(self.interval_spin.value()),
             timelapse_interval_unit=interval_unit,
             timelapse_brightness_percent=int(self.timelapse_brightness_spin.value()),
-            timelapse_light_duration_s=round(float(self.light_duration_spin.value()), 1),
+            timelapse_led_stabilization_ms=int(self.light_stabilization_spin.value()),
             timelapse_total_duration_min=int(self.total_duration_spin.value()),
             timelapse_infinite=self.infinite_check.isChecked(),
             live_record_video=self._video_recording_enabled(),
@@ -2188,7 +2190,7 @@ class MainWindow(QMainWindow):
             storage_mode=str(self.storage_combo.currentData()),
             interval_s=float(self.interval_spin.value() * interval_multiplier),
             brightness_percent=int(self.timelapse_brightness_spin.value()),
-            light_duration_s=float(self.light_duration_spin.value()),
+            light_duration_s=float(self.light_stabilization_spin.value()) / 1000.0,
             total_duration_s=float(self.total_duration_spin.value() * 60),
             infinite=self.infinite_check.isChecked(),
         )
@@ -2596,9 +2598,9 @@ class MainWindow(QMainWindow):
             self.timelapse_brightness_spin,
             self.timelapse_brightness_minus_button,
             self.timelapse_brightness_plus_button,
-            self.light_duration_spin,
-            self.light_duration_minus_button,
-            self.light_duration_plus_button,
+            self.light_stabilization_spin,
+            self.light_stabilization_minus_button,
+            self.light_stabilization_plus_button,
             self.total_duration_spin,
             self.infinite_check,
         ):
