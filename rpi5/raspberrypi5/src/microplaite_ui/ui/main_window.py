@@ -1072,7 +1072,7 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(16)
 
-        self.test_photo_controls_card = self._plain_card("card", width=440, height=420)
+        self.test_photo_controls_card = self._plain_card("card", width=440, height=500)
         controls = QVBoxLayout(self.test_photo_controls_card)
         controls.setContentsMargins(22, 16, 22, 16)
         controls.setSpacing(8)

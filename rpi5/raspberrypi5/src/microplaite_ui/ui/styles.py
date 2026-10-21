@@ -1,5 +1,7 @@
 """Qt style sheet."""
 
+CHECKBOX_INDICATOR_SIZE_PX = 28
+
 QSS = """
 QMainWindow,
 QWidget#appRoot,
@@ -417,6 +419,12 @@ QCheckBox {
     color: #0f1a29;
     font-size: 16px;
     spacing: 8px;
+    min-height: 36px;
+}
+
+QCheckBox::indicator {
+    width: @CHECKBOX_INDICATOR_SIZE@px;
+    height: @CHECKBOX_INDICATOR_SIZE@px;
 }
 
 QPlainTextEdit#logBox {
@@ -428,4 +436,4 @@ QPlainTextEdit#logBox {
     font-size: 12px;
     padding: 8px 10px;
 }
-"""
+""".replace("@CHECKBOX_INDICATOR_SIZE@", str(CHECKBOX_INDICATOR_SIZE_PX))
