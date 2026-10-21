@@ -2075,6 +2075,7 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _stop(self) -> None:
+        self.controller.cancel_pump_updates()
         self.controller.cancel_recipe()
         self.timelapse_service.stop()
         self._stop_live_video()
@@ -2650,7 +2651,9 @@ class MainWindow(QMainWindow):
         pump_status = _pump_status(state)
         self._set_dot(self.home_pump_dot, state.pump.readback is True and state.pump.running)
         self.home_pump_status.setText(pump_status)
-        self.home_pump_rpm.setText(_rpm(state.pump.actual_rpm))
+        self.home_pump_rpm.setText(
+            _rpm(state.pump.actual_rpm) if state.pump.readback is True else "-- RPM"
+        )
         if self.controller.logging_active:
             path = self.controller.logging_path
             logging_status = f"Logging ON {path.name if path else ''}".rstrip()
@@ -2726,7 +2729,9 @@ class MainWindow(QMainWindow):
         pump_status = _pump_status(state)
         self._set_dot(self.pump_dot, state.pump.readback is True and state.pump.running)
         self.pump_status.setText(pump_status)
-        self.pump_actual_rpm.setText(_rpm(state.pump.actual_rpm))
+        self.pump_actual_rpm.setText(
+            _rpm(state.pump.actual_rpm) if state.pump.readback is True else "Unconfirmed"
+        )
         self.pump_target_rpm.setText(_signed_rpm(state.pump.target_rpm))
         self.pump_slider.blockSignals(True)
         self.pump_spin.blockSignals(True)
@@ -2736,20 +2741,25 @@ class MainWindow(QMainWindow):
         self.pump_slider.blockSignals(False)
         self.pump_spin.blockSignals(False)
         self.pump_info.setText(
-            "Status: {status}\n"
-            "Actual speed: {actual} RPM  |  Target: {target}\n"
+            "Status: {status}  |  Sent: {sent}\n"
+            "Last valid speed: {actual}  |  Target: {target}\n"
             "Requested direction: {requested_direction}  |  "
             "Reported direction: {reported_direction}  |  Readback: {readback}\n"
             "Transition: {transition}  |  Full speed: {full_speed}  |  Error: {error}".format(
                 status=pump_status.lower(),
-                actual=_rpm_value(state.pump.actual_rpm),
+                actual=_number(state.pump.last_confirmed_rpm, 1, " RPM"),
+                sent=_number(state.pump.sent_target_rpm, 1, " RPM"),
                 target=_signed_rpm(state.pump.target_rpm),
                 requested_direction=_requested_pump_direction(state.pump.target_rpm),
                 reported_direction=_reported_pump_direction(state),
                 full_speed="yes" if state.pump.full_speed else "no",
                 readback=_flag(state.pump.readback, "OK", "No response"),
-                transition="reversing" if state.pump.direction_change_pending else "ready",
-                error=_error_text(state.last_error),
+                transition=(
+                    "reversing" if state.pump.direction_change_pending
+                    else "confirming" if state.pump.confirmation_pending
+                    else "suspended" if state.pump.confirmation_error else "ready"
+                ),
+                error=_error_text(state.last_error or state.pump.confirmation_error),
             )
         )
 
@@ -2929,6 +2939,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if not self._close_cleanup_done:
             self._close_cleanup_done = True
+            self.controller.cancel_pump_updates()
             self.timer.stop()
             for label, action in (
                 ("Preferences save", self._save_preferences),
@@ -2975,6 +2986,10 @@ def _reported_pump_direction(state: AppState) -> str:
 
 
 def _pump_status(state: AppState) -> str:
+    if state.pump.confirmation_pending:
+        return "Confirming"
+    if state.pump.confirmation_error:
+        return "Unconfirmed"
     if state.pump.readback is not True:
         return "Unconfirmed"
     return "Running" if state.pump.running else "Stopped"

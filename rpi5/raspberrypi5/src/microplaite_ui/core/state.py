@@ -70,6 +70,10 @@ class PumpState:
     direction_change_pending: bool = False
     full_speed: bool = False
     readback: bool | None = None
+    sent_target_rpm: float | None = None
+    last_confirmed_rpm: float | None = None
+    confirmation_pending: bool = False
+    confirmation_error: str = ""
 
 
 @dataclass(slots=True)

@@ -34,6 +34,9 @@ class RecordingV2Client:
         self.block_status = False
         self.status_error: Exception | None = None
         self.pump_status_payload: dict[str, object] = {"pump_readback_valid": True}
+        self.pump_rpm = 3.0
+        self.pump_running = True
+        self.pump_direction = "CW"
         self.pump_status_started = threading.Event()
         self.release_pump_status = threading.Event()
         self.block_pump_status = False
@@ -70,13 +73,18 @@ class RecordingV2Client:
         return self._record("heater_disable")
 
     def pump_start(self, rpm: float, direction: str | None = None) -> V2Response:
+        self.pump_rpm, self.pump_running = rpm, True
+        self.pump_direction = direction or "CW"
         args = (rpm,) if direction is None else (rpm, direction)
         return self._record("pump_start", *args)
 
     def pump_stop(self) -> V2Response:
+        self.pump_rpm, self.pump_running = 0.1, False
         return self._record("pump_stop")
 
     def pump_set_rpm(self, rpm: float, direction: str | None = None) -> V2Response:
+        self.pump_rpm = rpm
+        self.pump_direction = direction or "CW"
         args = (rpm,) if direction is None else (rpm, direction)
         return self._record("pump_set_rpm", *args)
 
@@ -87,7 +95,13 @@ class RecordingV2Client:
         self.pump_status_started.set()
         if self.block_pump_status:
             assert self.release_pump_status.wait(1.0)
-        return self._record("pump_status", **self.pump_status_payload)
+        return self._record("pump_status", **{
+            "pump_running": self.pump_running,
+            "pump_rpm": self.pump_rpm,
+            "pump_direction": self.pump_direction,
+            "pump_full_speed": False,
+            **self.pump_status_payload,
+        })
 
     def neopixel_set(
         self,
@@ -400,7 +414,8 @@ def test_running_sign_change_stays_blocked_without_fresh_stop_confirmation(
 
     assert controller.state.pump.target_rpm == -10.0
     assert controller.state.pump.direction_change_pending is True
-    assert "not confirmed" in controller.state.last_error.lower()
+    assert "not confirmed" in controller.state.pump.confirmation_error.lower()
+    assert controller.state.last_error == ""
     assert client.calls == [("pump_stop",), ("pump_status",)]
 
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from microplaite_ui.config import (
     DEFAULT_LOG_PERIOD_MS,
@@ -31,6 +31,9 @@ from microplaite_ui.services.status_csv_logger import StatusCsvLogger
 
 class AppController:
     PUMP_UPDATE_INTERVAL_S = 0.2
+    PUMP_READBACK_ATTEMPTS = 3
+    PUMP_READBACK_RETRY_S = 0.1
+    PUMP_READBACK_TIMEOUT_S = 1.0
 
     def __init__(self, client: Esp32Client, status_logger: StatusCsvLogger | None = None) -> None:
         self.client = client
@@ -50,9 +53,12 @@ class AppController:
         self._pump_update_thread: threading.Thread | None = None
         self._pump_last_update_at = 0.0
         self._pump_activation_generation = 0
+        self._pump_zero_crossing_generation: int | None = None
 
     def open_connection(self) -> AppState:
         self._cancel_pump_automation()
+        self.state.pump.confirmation_error = ""
+        self.state.pump.sent_target_rpm = None
         open_session = getattr(self.client, "open_session", None)
         if callable(open_session):
             return self._call(open_session)
@@ -60,6 +66,8 @@ class AppController:
 
     def reconnect(self) -> AppState:
         self._cancel_pump_automation()
+        self.state.pump.confirmation_error = ""
+        self.state.pump.sent_target_rpm = None
         reconnect_session = getattr(self.client, "reconnect_session", None)
         if not callable(reconnect_session):
             return self.state
@@ -81,7 +89,10 @@ class AppController:
         if not self.state.connected:
             return self.state
         try:
-            with self._client_lock:
+            # A pump RJ can take 200 ms. The Qt poll must never wait for it.
+            if not self._client_lock.acquire(blocking=not self._is_v2):
+                return self.state
+            try:
                 read_pending_lines = getattr(self.client, "read_pending_lines", None)
                 if self._is_v2:
                     for message in self.client.read_available():
@@ -92,6 +103,8 @@ class AppController:
                 else:
                     for message in self.client.read_available():
                         self._apply(message)
+            finally:
+                self._client_lock.release()
         except Esp32ClientError as exc:
             self._mark_connection_lost(str(exc))
             return self.state
@@ -119,6 +132,7 @@ class AppController:
 
     def stop(self) -> AppState:
         self._cancel_pump_automation()
+        self.state.pump.confirmation_error = ""
         self.cancel_recipe()
         return self._call(self.client.stop)
 
@@ -276,7 +290,7 @@ class AppController:
         with self._pump_update_condition:
             generation = self._pump_activation_generation
             if activation_generation is not None and activation_generation != generation:
-                allow_restart = False
+                return self.state.last_message
             self._pump_pending_update = (target, bool(allow_restart), generation)
             thread = self._pump_update_thread
             if thread is None or not thread.is_alive():
@@ -323,7 +337,7 @@ class AppController:
                         + max(0.0, self.PUMP_UPDATE_INTERVAL_S)
                         - time.monotonic()
                     )
-                    if wait_s > 0.0:
+                    if wait_s > 0.0 and pending[0] != 0.0:
                         self._pump_update_condition.wait(wait_s)
                         continue
                     self._pump_pending_update = None
@@ -332,9 +346,16 @@ class AppController:
                     target,
                     allow_restart=allow_restart,
                     expected_generation=generation,
+                    latest_only=True,
                 )
                 with self._pump_update_condition:
-                    self._pump_last_update_at = time.monotonic()
+                    if self.state.pump.confirmation_error and not (
+                        self._pump_pending_update is not None
+                        and self._pump_pending_update[0] == 0.0
+                    ):
+                        # Keep the requested value in state, but stop retrying until
+                        # a new operator input. Never run an unbounded recovery loop.
+                        self._pump_pending_update = None
         finally:
             with self._pump_update_condition:
                 if self._pump_update_thread is threading.current_thread():
@@ -347,14 +368,50 @@ class AppController:
         *,
         allow_restart: bool,
         expected_generation: int,
+        latest_only: bool = False,
     ) -> str:
         if not self._pump_generation_is_current(expected_generation):
             return self.state.last_message
         if target == 0.0:
             self._stop_pump_for_setpoint()
+            if self.state.pump.readback is True and not self.state.pump.running:
+                self._pump_zero_crossing_generation = expected_generation
             return self.state.last_message
+        if not self.state.pump.running and not (
+            allow_restart and self._pump_zero_crossing_generation == expected_generation
+        ):
+            return self.state.last_message
+        if not self._activation_allowed():
+            self._reject_activation()
+            return self.state.last_message
+        if self._is_v2 and (
+            self.state.pump.readback is not True
+            or self.state.pump.confirmation_pending
+            or self.state.pump.confirmation_error
+            or self._reported_pump_direction() is None
+        ):
+            if not self._confirm_pump_readback(
+                expected_generation,
+                target=self.state.pump.sent_target_rpm,
+            ):
+                return self.state.last_message
+            if not self._pump_generation_is_current(expected_generation):
+                return self.state.last_message
+            if latest_only:
+                with self._pump_update_condition:
+                    pending = self._pump_pending_update
+                    if pending is not None and pending[2] == expected_generation:
+                        target, allow_restart, _ = pending
+                        self._pump_pending_update = None
+                if target == 0.0:
+                    return self._apply_prepared_pump_target(
+                        target,
+                        allow_restart=allow_restart,
+                        expected_generation=expected_generation,
+                        latest_only=latest_only,
+                    )
         if not self.state.pump.running:
-            if allow_restart:
+            if allow_restart and self._pump_zero_crossing_generation == expected_generation:
                 self._start_pump_after_zero_crossing(expected_generation)
             return self.state.last_message
         if self.state.pump.readback is not True:
@@ -371,11 +428,31 @@ class AppController:
             self._stop_for_direction_change(expected_generation)
             return self.state.last_message
 
-        if not self._pump_generation_is_current(expected_generation):
-            return self.state.last_message
-        self.state.pump.readback = None
-        self._call(self._pump_set_rpm_action(abs(target), requested_direction))
-        self._poll_pump_status()
+        with self._client_lock:
+            self._sync_session_state()
+            if not self._pump_generation_is_current(expected_generation):
+                return self.state.last_message
+            if latest_only and target != self.state.pump.target_rpm:
+                return self.state.last_message
+            if (
+                self.state.pump.sent_target_rpm == target
+                and self._pump_readback_matches(target)
+            ):
+                return self.state.last_message
+            self.state.pump.readback = None
+            self.state.pump.confirmation_pending = True
+            self.state.pump.confirmation_error = ""
+            self.state.pump.sent_target_rpm = target
+            self._pump_last_update_at = time.monotonic()
+            response = self._call_message(
+                self._pump_set_rpm_action(abs(target), requested_direction)
+            )
+        if response is not None and response.ok is True:
+            if self._is_v2:
+                self._confirm_pump_readback(expected_generation, target=target)
+            else:
+                self._poll_pump_status()
+                self.state.pump.confirmation_pending = False
         return self.state.last_message
 
     def prepare_pump_target_rpm(self, rpm: object) -> float:
@@ -408,6 +485,8 @@ class AppController:
             return self._set_pump_error("Pump readback is unconfirmed; START was not sent")
         direction = self._pump_target_direction(target)
         self.state.pump.readback = None
+        self.state.pump.sent_target_rpm = target
+        self._pump_last_update_at = time.monotonic()
         self._call(self._pump_start_action(abs(target), direction))
         self._poll_pump_status()
         return self.state.last_message
@@ -418,6 +497,9 @@ class AppController:
 
     def _stop_pump_for_setpoint(self) -> str:
         self.state.pump.direction_change_pending = False
+        self.state.pump.confirmation_error = ""
+        self.state.pump.confirmation_pending = False
+        self.state.pump.sent_target_rpm = 0.0
         self.state.pump.readback = None
         self._call(self.client.pump_stop)
         self._poll_pump_status()
@@ -460,10 +542,10 @@ class AppController:
         self.state.pump.direction_change_pending = True
         self.state.pump.readback = None
         stop_response = self._call_message(self.client.pump_stop)
-        if stop_response is None:
+        if stop_response is None or stop_response.ok is not True:
             return
         status_response = self._poll_pump_status()
-        if status_response is None:
+        if status_response is None or status_response.ok is not True:
             return
         fields = status_response.fields
         if (
@@ -473,8 +555,7 @@ class AppController:
             self._set_pump_error("Pump direction change stop was not confirmed")
             return
         self.state.pump.direction_change_pending = False
-        if self.state.last_error.startswith("Pump direction change"):
-            self.state.last_error = ""
+        self.state.pump.confirmation_error = ""
         if not self._pump_generation_is_current(expected_generation):
             self.state.last_message = "Pump direction change cancelled"
             return
@@ -495,8 +576,14 @@ class AppController:
             self._set_pump_error("Pump direction change requires bidirectional support")
             return
         direction = self._pump_target_direction(target)
-        self.state.pump.readback = None
-        self._call(self._pump_start_action(abs(target), direction))
+        with self._client_lock:
+            self._sync_session_state()
+            if not self._pump_generation_is_current(expected_generation):
+                return
+            self.state.pump.readback = None
+            self.state.pump.sent_target_rpm = target
+            self._pump_last_update_at = time.monotonic()
+            self._call(self._pump_start_action(abs(target), direction))
         self._poll_pump_status()
 
     def _start_pump_after_zero_crossing(self, expected_generation: int) -> None:
@@ -512,8 +599,14 @@ class AppController:
         if target < 0.0 and self.state.pump.bidirectional_supported is not True:
             return
         direction = self._pump_target_direction(target)
-        self.state.pump.readback = None
-        self._call(self._pump_start_action(abs(target), direction))
+        with self._client_lock:
+            if not self._pump_generation_is_current(expected_generation):
+                return
+            self._pump_zero_crossing_generation = None
+            self.state.pump.readback = None
+            self.state.pump.sent_target_rpm = target
+            self._pump_last_update_at = time.monotonic()
+            self._call(self._pump_start_action(abs(target), direction))
         self._poll_pump_status()
 
     def _pump_generation_is_current(self, expected_generation: int) -> bool:
@@ -524,12 +617,19 @@ class AppController:
         with self._pump_update_condition:
             self._pump_activation_generation += 1
             self._pump_pending_update = None
+            self._pump_zero_crossing_generation = None
             self._pump_update_condition.notify_all()
         self.state.pump.direction_change_pending = False
+        self.state.pump.confirmation_pending = False
+
+    def cancel_pump_updates(self) -> None:
+        """Invalidate deferred motion before UI cleanup can perform serial I/O."""
+        self._cancel_pump_automation()
 
     def _set_pump_error(self, message: str) -> str:
         self.state.last_message = message
-        self.state.last_error = message
+        self.state.pump.confirmation_error = message
+        self.state.pump.confirmation_pending = False
         self.logs.append(message)
         return message
 
@@ -615,6 +715,87 @@ class AppController:
             return self._call_message(self.client.pump_status)
         return None
 
+    def _pump_readback_matches(self, target: float | None, fields: dict | None = None) -> bool:
+        if fields is None:
+            fields = {
+                "pump_readback_valid": self.state.pump.readback,
+                "pump_running": self.state.pump.running,
+                "pump_rpm": self.state.pump.actual_rpm,
+                "pump_direction": self.state.pump.direction,
+                "pump_full_speed": self.state.pump.full_speed,
+            }
+        if fields.get("pump_readback_valid") is not True:
+            return False
+        rpm = fields.get("pump_rpm")
+        running = fields.get("pump_running")
+        direction = fields.get("pump_direction")
+        if rpm is None or not isinstance(running, bool):
+            return False
+        if self.state.pump.bidirectional_supported is not True and direction is None:
+            direction = "CW"
+        if direction not in {"CW", "CCW"}:
+            return False
+        if target is None:
+            return True
+        if target == 0.0:
+            return running is False and float(rpm) <= 0.1
+        return (
+            running is True
+            and direction == self._pump_target_direction(target)
+            and round(float(rpm), 1) == abs(target)
+            and fields.get("pump_full_speed") is False
+        )
+
+    def _confirm_pump_readback(self, generation: int, *, target: float | None) -> bool:
+        """Retry RJ only, yielding the serial client between bounded attempts."""
+        deadline = time.monotonic() + self.PUMP_READBACK_TIMEOUT_S
+        self.state.pump.confirmation_pending = True
+        for attempt in range(self.PUMP_READBACK_ATTEMPTS):
+            if not self._pump_generation_is_current(generation) or not self._activation_allowed():
+                self.state.pump.confirmation_pending = False
+                return False
+            with self._pump_update_condition:
+                if self._pump_pending_update is not None and self._pump_pending_update[0] == 0.0:
+                    self.state.pump.confirmation_pending = False
+                    return False
+            if time.monotonic() >= deadline:
+                break
+            started = time.monotonic()
+            response = self._poll_pump_status()
+            if response is None or response.ok is not True:
+                self.state.pump.confirmation_pending = False
+                return False
+            fields = response.fields
+            self.logs.append(
+                f"Pump RJ {attempt + 1}: sent={target}, "
+                f"valid={fields.get('pump_readback_valid')}, "
+                f"running={fields.get('pump_running')}, rpm={fields.get('pump_rpm')}, "
+                f"direction={fields.get('pump_direction')}, "
+                f"elapsed_ms={(time.monotonic() - started) * 1000:.0f}"
+            )
+            if not self._pump_generation_is_current(generation):
+                return False
+            if self._pump_readback_matches(target, fields):
+                self.state.pump.confirmation_pending = False
+                self.state.pump.confirmation_error = ""
+                return True
+            if attempt + 1 < self.PUMP_READBACK_ATTEMPTS:
+                with self._pump_update_condition:
+                    self._pump_update_condition.wait_for(
+                        lambda: (
+                            generation != self._pump_activation_generation
+                            or (self._pump_pending_update is not None
+                                and self._pump_pending_update[0] == 0.0)
+                        ),
+                        timeout=max(0.0, min(
+                            self.PUMP_READBACK_RETRY_S,
+                            deadline - time.monotonic(),
+                        )),
+                    )
+        if self._pump_generation_is_current(generation):
+            self._set_pump_error("Pump confirmation unconfirmed; updates suspended (new input to retry)")
+        return False
+
     def _execute_recipe_command(self, step: RecipeStep) -> None:
         if step.action is RecipeAction.SET_TEMPERATURE:
             if step.target_c is None:
@@ -677,9 +858,9 @@ class AppController:
         try:
             with self._client_lock:
                 message = action()
-            self.state.connected = True
-            self._apply(message)
-            self._sync_session_state()
+                self.state.connected = True
+                self._apply(message)
+                self._sync_session_state()
         except Esp32ClientError as exc:
             self._mark_connection_lost(str(exc))
             return None
@@ -704,6 +885,8 @@ class AppController:
 
     def _mark_connection_lost(self, message: str) -> None:
         self._cancel_pump_automation()
+        self.state.pump.readback = None
+        self.state.pump.direction = None
         self._recipe_runner.fail("Connection LOST", request_stop=False)
         self.stop_logging()
         self.state.connected = False
@@ -733,6 +916,8 @@ class AppController:
             self.state.pump_direction = direction if readback is True else None
         elif readback is not None and readback is not True:
             self.state.pump_direction = None
+        if readback is True and "pump_rpm" in message.fields:
+            self.state.pump.last_confirmed_rpm = self.state.pump.actual_rpm
         if (
             self.state.system_state == "FAULT"
             or self.state.safety == "ERROR"
@@ -756,6 +941,7 @@ class AppController:
             self._recipe_runner.publish_status(sample)
         if message.error:
             self.state.last_error = message.error
+            self._cancel_pump_automation()
         elif self.state.last_error == "ESP32 not connected":
             self.state.last_error = ""
         if message.is_status and message.fields.get("temperature_valid") is True:
